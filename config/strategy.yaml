@@ -1,0 +1,49 @@
+# Trading Bot Strategy Configuration
+# =================================
+# Strategy parameters for Polymarket prediction market trading
+
+# Probability Range (10% - 90%)
+# Only trade when Yes probability is between these values
+MIN_PROBABILITY: 0.10
+MAX_PROBABILITY: 0.90
+
+# Position Sizing (in USDC)
+POSITION_SIZE: 1.0
+
+# Market Filters
+MIN_VOLUME: 50000        # Only trade markets with $50k+ volume
+MIN_LIQUIDITY: 10000     # Only trade with $10k+ liquidity
+
+# Signal Strength Thresholds
+VOLUME_SPIKE_MULTIPLIER: 2.0    # High volume = signal boost
+ODDS_MOVEMENT_THRESHOLD: 0.05   # 5% movement = signal
+MID_RANGE_ODDS_BOOST: true      # Boost signals in 30-70% range
+
+# Risk Management
+MAX_TRADES_PER_DAY: 2
+MAX_DAILY_LOSS_PERCENT: 20
+MAX_DRAWDOWN_PERCENT: 20
+KILL_SWITCH: true
+
+# Fees (for accurate PnL calculation)
+FEE_PERCENT: 0.02       # 2% platform fee
+SLIPPAGE_PERCENT: 0.01  # 1% slippage assumption
+
+# Entry Rules (must ALL be true)
+ENTRY_RULES:
+  - "Probability between MIN and MAX"
+  - "Volume above MIN_VOLUME"
+  - "Liquidity above MIN_LIQUIDITY"
+  - "Signal strength >= 0.3"
+
+# Exit Rules
+EXIT_RULES:
+  - "Hold until market resolves"  # Simplest: no early exit
+  - "Or manual approval required"
+
+# Market Categories to Focus On (empty = all)
+# MARKET_CATEGORIES:
+#   - "Politics"
+#   - "Crypto"
+#   - "Science"
+#   - "Sports"
