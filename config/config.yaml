@@ -1,0 +1,67 @@
+# Trading Bot Configuration
+# All settings in one place - no hard-coded values
+
+# === MARKET SETTINGS ===
+market:
+  name: "polymarket"
+  type: "prediction_market"
+  asset: "USDC"
+  base_position: 1.0  # $1 USDC per trade (Phase 1)
+
+# === RISK LIMITS ===
+risk:
+  max_daily_loss_percent: 20
+  max_drawdown_percent: 20
+  max_trades_per_day: 2
+  max_position_size: 1.0
+  leverage: 0  # No leverage for safety
+
+# === TRADING MODE ===
+mode:
+  automation_level: "alert_only"  # alert_only | manual_approve | auto_trade
+  require_approval: true
+  kill_switch: true
+
+# === TIMEZONE ===
+timezone: "Europe/London"
+trading_hours:
+  start: "00:00"
+  end: "23:59"
+  weekend_allowed: true
+
+# === DATA SOURCE ===
+data:
+  source: "polymarket_api"
+  api_endpoint: "https://gamma-api.polymarket.com"
+  refresh_interval_seconds: 60
+
+# === NOTIFICATIONS ===
+notifications:
+  telegram:
+    enabled: true
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    chat_id: "${TELEGRAM_CHAT_ID}"
+  alerts:
+    on_signal: true
+    on_approval: true
+    on_trade: true
+    on_error: true
+    on_daily_summary: true
+
+# === LOGGING ===
+logging:
+  level: "INFO"
+  format: "json"
+  file: "logs/trading_bot.log"
+  daily_rotation: true
+  retention_days: 30
+
+# === SAFETY FEATURES ===
+safety:
+  circuit_breaker:
+    enabled: true
+    consecutive_losses: 3
+    daily_loss_threshold_percent: 10
+  kill_switch:
+    enabled: true
+    manual_trigger_only: true
