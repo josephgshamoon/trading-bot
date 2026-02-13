@@ -1,0 +1,100 @@
+exchange:
+  name: polymarket
+  # Gamma API for market data (public, no auth needed)
+  gamma_api_url: https://gamma-api.polymarket.com
+  # CLOB API for order placement (requires auth)
+  clob_api_url: https://clob.polymarket.com
+  # Currency
+  currency: USDC
+
+trading:
+  # Mode: backtest | paper | live
+  mode: paper
+  # Maximum number of open positions at once
+  max_open_positions: 5
+  # Default position size in USDT
+  default_position_usdc: 5.0
+  # Maximum single position in USDC
+  max_position_usdc: 25.0
+  # Minimum position size in USDC
+  min_position_usdc: 1.0
+
+risk:
+  # Maximum daily loss in USDC
+  max_daily_loss_usdc: 20.0
+  # Maximum total drawdown percentage before kill switch
+  max_drawdown_pct: 20.0
+  # Maximum number of trades per day
+  max_trades_per_day: 10
+  # Circuit breaker: consecutive losses before pausing
+  circuit_breaker_losses: 3
+  # Cooldown period after circuit breaker (minutes)
+  cooldown_minutes: 120
+  # Never bet on events with probability above this (too expensive)
+  max_entry_probability: 0.85
+  # Never bet on events with probability below this (too unlikely)
+  min_entry_probability: 0.15
+  # Maximum exposure to any single market category
+  max_category_exposure_usdc: 50.0
+
+strategy:
+  # Active strategy: value_betting | momentum | arbitrage
+  active: value_betting
+
+  value_betting:
+    # Minimum edge (difference between our estimate and market price)
+    min_edge: 0.05
+    # Minimum volume in USD for market consideration
+    min_volume_usd: 50000
+    # Minimum liquidity in USD
+    min_liquidity_usd: 10000
+    # Probability sweet spot range
+    prob_range_low: 0.20
+    prob_range_high: 0.80
+    # Kelly criterion fraction (fraction of full Kelly to use)
+    kelly_fraction: 0.25
+
+  momentum:
+    # Minimum price movement over lookback period
+    min_price_move: 0.05
+    # Lookback period in hours for momentum calculation
+    lookback_hours: 24
+    # Minimum volume spike multiplier
+    volume_spike_factor: 2.0
+    # Require price moving in same direction for N consecutive snapshots
+    confirmation_count: 3
+    # Minimum volume in USD
+    min_volume_usd: 50000
+
+  arbitrage:
+    # Minimum profit margin (YES_price + NO_price must differ from 1.00 by this much)
+    min_spread: 0.02
+    # Minimum liquidity on both sides
+    min_liquidity_usd: 5000
+    # Fee percentage to account for
+    fee_pct: 2.0
+
+backtest:
+  # Number of historical snapshots to simulate
+  lookback_snapshots: 200
+  # Platform fee percentage
+  fee_pct: 2.0
+  # Slippage percentage
+  slippage_pct: 1.0
+  # Starting balance
+  starting_balance_usdc: 1000.0
+  # Snapshot interval (hours) for simulation
+  snapshot_interval_hours: 1
+
+logging:
+  level: INFO
+  file: logs/trading_bot.log
+
+filters:
+  # Market filters
+  min_volume_usd: 10000
+  min_liquidity_usd: 5000
+  # Only trade markets that are active
+  active_only: true
+  # Exclude markets ending within N hours (too late to enter)
+  min_hours_to_end: 24

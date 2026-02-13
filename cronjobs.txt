@@ -1,9 +1,0 @@
-#!/bin/bash
-# Trading Bot Data Collection Cron Job
-# Runs every hour to build historical database
-
-# Run data collector every hour
-0 * * * * /usr/bin/python3 /home/clawdbot/clawd/trading-bot/src/data_collector.py --once >> /home/clawdbot/clawd/trading-bot/logs/cron.log 2>&1
-
-# Also run paper trader every hour to check for signals
-5 * * * * /usr/bin/python3 /home/clawdbot/clawd/trading-bot/src/paper_trader.py --scan >> /home/clawdbot/clawd/trading-bot/logs/paper_trader.log 2>&1

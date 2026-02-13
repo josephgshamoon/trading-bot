@@ -1,10 +1,40 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
 .env
-logs/*.log
-data/*.csv
+.env.local
+.env.production
+venv/
+.venv/
+
+# Secrets
 secrets/
-.pytest_cache/
+*.pem
+*.key
+
+# Data (large files)
+data/*.csv
+data/*.parquet
+logs/*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
 .coverage
 htmlcov/
+.pytest_cache/
