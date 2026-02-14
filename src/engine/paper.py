@@ -11,6 +11,7 @@ from ..data.feed import DataFeed
 from ..data.indicators import MarketIndicators
 from ..risk.manager import RiskManager
 from ..strategy.base import TradeSignal
+from ..strategy.news_enhanced import NewsEnhancedStrategy
 
 logger = logging.getLogger("trading_bot.paper")
 
@@ -80,13 +81,24 @@ class PaperEngine:
             f"strategy={strategy_name}, balance=${balance:.2f}"
         )
 
-    def scan_markets(self, strategy) -> list[TradeSignal]:
-        """Scan all filtered markets and return trade signals."""
+    def scan_markets(
+        self,
+        strategy,
+        news_context: dict[str, dict] | None = None,
+    ) -> list[TradeSignal]:
+        """Scan all filtered markets and return trade signals.
+
+        Args:
+            strategy: The strategy to evaluate markets with.
+            news_context: Optional dict mapping market_id -> news analysis.
+                Used by NewsEnhancedStrategy for information edge.
+        """
         if not self.session:
             raise RuntimeError("No active session. Call start_session() first.")
 
         snapshots = self.feed.get_all_snapshots(self.config)
         signals = []
+        is_news_strategy = isinstance(strategy, NewsEnhancedStrategy)
 
         for snap in snapshots:
             # Compute indicators
@@ -102,8 +114,13 @@ class PaperEngine:
                 except Exception:
                     pass
 
-            # Evaluate strategy
-            signal = strategy.evaluate(snap, indicators)
+            # Evaluate strategy (with news if available)
+            if is_news_strategy and news_context:
+                news_analysis = news_context.get(snap["market_id"])
+                signal = strategy.evaluate(snap, indicators, news_analysis)
+            else:
+                signal = strategy.evaluate(snap, indicators)
+
             if signal is None:
                 continue
 

@@ -18,11 +18,48 @@ from .utils.logger import setup_logger
 from .exchange.polymarket_client import PolymarketClient
 from .data.feed import DataFeed
 from .data.indicators import MarketIndicators
+from .data.news_feed import NewsFeed
+from .intelligence.analyzer import MarketAnalyzer
 from .strategy import STRATEGIES
+from .strategy.news_enhanced import NewsEnhancedStrategy
 from .engine.backtest import BacktestEngine
 from .engine.paper import PaperEngine
 from .engine.live import LiveEngine
 from .risk.manager import RiskManager
+
+
+def _get_news_context(config: dict, snapshots: list[dict]) -> dict[str, dict]:
+    """Fetch news and run LLM analysis for all markets.
+
+    Returns a dict mapping market_id -> analysis result.
+    Used by both scan and paper commands when news_enhanced is active.
+    """
+    logger = logging.getLogger("trading_bot")
+
+    news_feed = NewsFeed(config)
+    analyzer = MarketAnalyzer(config)
+
+    logger.info(f"Fetching news (backend: {analyzer.backend})...")
+    print(f"  News intelligence: backend={analyzer.backend}")
+
+    # Bulk fetch news once (efficient)
+    all_news = news_feed.get_bulk_news()
+    print(f"  Fetched {len(all_news)} news articles")
+
+    if not all_news:
+        logger.warning("No news articles fetched — falling back to pure statistical")
+        return {}
+
+    # Analyze each market against the news
+    results = analyzer.analyze_markets_batch(snapshots, all_news)
+
+    news_hits = sum(
+        1 for r in results.values()
+        if r.get("news_signal_strength", 0) > 0.1
+    )
+    print(f"  News signals found for {news_hits}/{len(snapshots)} markets")
+
+    return results
 
 
 def cmd_scan(config: dict):
@@ -42,6 +79,12 @@ def cmd_scan(config: dict):
     snapshots = feed.get_all_snapshots(config)
 
     print(f"\nScanning {len(snapshots)} markets with {strategy_name} strategy...\n")
+
+    # Get news context if using news_enhanced strategy
+    news_context = {}
+    is_news_strategy = isinstance(strategy, NewsEnhancedStrategy)
+    if is_news_strategy:
+        news_context = _get_news_context(config, snapshots)
 
     signals = []
     for snap in snapshots:
@@ -73,7 +116,23 @@ def cmd_scan(config: dict):
                 f"momentum={indicators.get('momentum_6', 0):.4f}"
             )
 
-        signal = strategy.evaluate(snap, indicators)
+            # Show news info if available
+            news = news_context.get(snap["market_id"])
+            if news and news.get("news_signal_strength", 0) > 0.1:
+                print(
+                    f"    NEWS: {news['direction']} "
+                    f"shift={news['probability_shift']:+.3f} "
+                    f"str={news['news_signal_strength']:.2f} "
+                    f"| {news.get('reasoning', '')[:60]}"
+                )
+
+        # Evaluate with or without news
+        if is_news_strategy:
+            news_analysis = news_context.get(snap["market_id"])
+            signal = strategy.evaluate(snap, indicators, news_analysis)
+        else:
+            signal = strategy.evaluate(snap, indicators)
+
         if signal:
             signals.append(signal)
             if verbose:
@@ -152,13 +211,22 @@ def cmd_paper(config: dict):
     if engine.load_session():
         print(f"\nResumed paper session: {engine.session.session_id}")
     else:
-        balance = config.get("backtest", {}).get("starting_balance_usdc", 1000.0)
+        balance = config.get("backtest", {}).get("starting_balance_usdc", 200.0)
         engine.start_session(strategy_name, balance)
         print(f"\nStarted new paper session with ${balance:.2f}")
 
-    # Scan for signals
+    # Get news context if using news_enhanced strategy
+    is_news_strategy = isinstance(strategy, NewsEnhancedStrategy)
+    news_context = {}
+
+    if is_news_strategy:
+        print(f"\nFetching news intelligence...\n")
+        snapshots = feed.get_all_snapshots(config)
+        news_context = _get_news_context(config, snapshots)
+
+    # Scan for signals (with news if available)
     print(f"\nScanning markets with {strategy_name}...\n")
-    signals = engine.scan_markets(strategy)
+    signals = engine.scan_markets(strategy, news_context=news_context)
 
     if not signals:
         print("No trade signals found.")
@@ -193,6 +261,7 @@ def cmd_paper(config: dict):
     summary = engine.get_summary()
     print(f"\n{'='*50}")
     print(f"  Session: {summary['session_id']}")
+    print(f"  Strategy: {summary['strategy']}")
     print(f"  Balance: ${summary['current_balance']:.2f}")
     print(f"  PnL: ${summary['total_pnl']:+.2f}")
     print(f"  Trades: {summary['total_trades']} (W:{summary['wins']} L:{summary['losses']})")
@@ -230,12 +299,23 @@ def cmd_status(config: dict):
     engine = PaperEngine(config, feed, risk)
     has_session = engine.load_session()
 
+    # Check news/intelligence status
+    analyzer = MarketAnalyzer(config)
+    news_feed = NewsFeed(config)
+
     print(f"\n{'='*50}")
     print("  TRADING BOT STATUS")
     print(f"{'='*50}")
     print(f"  Mode:     {config.get('trading', {}).get('mode', 'paper')}")
     print(f"  Strategy: {config.get('strategy', {}).get('active', 'value_betting')}")
     print(f"  Live:     {'ENABLED' if live.is_enabled else 'disabled'}")
+
+    # News intelligence status
+    print(f"\n  News Intelligence:")
+    print(f"    LLM Backend: {analyzer.backend}")
+    print(f"    NewsAPI:     {'configured' if news_feed.newsapi_key else 'not set'}")
+    print(f"    GNews:       {'configured' if news_feed.gnews_key else 'not set'}")
+    print(f"    RSS Feeds:   {sum(len(v) for v in RSS_FEEDS.values())} configured")
 
     if has_session:
         summary = engine.get_summary()
@@ -258,6 +338,10 @@ def cmd_status(config: dict):
     print(f"    Can Trade: {risk_status['can_trade']}")
     print(f"    Kill Switch: {'ACTIVE' if risk_status['kill_switch'] else 'off'}")
     print(f"{'='*50}\n")
+
+
+# Import RSS_FEEDS for status display
+from .data.news_feed import RSS_FEEDS
 
 
 def main():

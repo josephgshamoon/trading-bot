@@ -12,16 +12,16 @@ trading:
   mode: paper
   # Maximum number of open positions at once
   max_open_positions: 50
-  # Default position size in USDT
-  default_position_usdc: 5.0
+  # Default position size in USDC (scaled for $200 balance)
+  default_position_usdc: 10.0
   # Maximum single position in USDC
-  max_position_usdc: 25.0
+  max_position_usdc: 50.0
   # Minimum position size in USDC
-  min_position_usdc: 1.0
+  min_position_usdc: 2.0
 
 risk:
-  # Maximum daily loss in USDC
-  max_daily_loss_usdc: 20.0
+  # Maximum daily loss in USDC (20% of $200)
+  max_daily_loss_usdc: 40.0
   # Maximum total drawdown percentage before kill switch
   max_drawdown_pct: 20.0
   # Maximum number of trades per day
@@ -35,11 +35,11 @@ risk:
   # Never bet on events with probability below this (too unlikely)
   min_entry_probability: 0.15
   # Maximum exposure to any single market category
-  max_category_exposure_usdc: 50.0
+  max_category_exposure_usdc: 100.0
 
 strategy:
-  # Active strategy: value_betting | momentum | arbitrage
-  active: value_betting
+  # Active strategy: value_betting | momentum | arbitrage | news_enhanced
+  active: news_enhanced
 
   value_betting:
     # Minimum edge (difference between our estimate and market price)
@@ -53,6 +53,24 @@ strategy:
     prob_range_high: 0.85
     # Kelly criterion fraction (fraction of full Kelly to use)
     kelly_fraction: 0.25
+
+  news_enhanced:
+    # Minimum edge (same as value betting base)
+    min_edge: 0.03
+    min_volume_usd: 10000
+    min_liquidity_usd: 5000
+    prob_range_low: 0.20
+    prob_range_high: 0.80
+    kelly_fraction: 0.25
+    # News vs statistical weight blend (must sum to 1.0)
+    news_weight: 0.4
+    stat_weight: 0.6
+    # Minimum news signal strength to consider (0-1)
+    min_news_signal_strength: 0.1
+    # Position size multiplier when news confirms direction
+    news_boost_factor: 2.0
+    # Position size penalty when news contradicts statistical signal
+    contradiction_penalty: 0.5
 
   momentum:
     # Minimum price movement over lookback period
@@ -74,6 +92,24 @@ strategy:
     # Fee percentage to account for
     fee_pct: 2.0
 
+news:
+  # Maximum age of news articles to consider (hours)
+  max_age_hours: 24
+  # Maximum articles to match per market
+  max_articles_per_market: 10
+
+intelligence:
+  # LLM model for analysis (uses Claude Haiku for cost efficiency)
+  model: claude-haiku-4-5-20251001
+  # OpenAI fallback model
+  openai_model: gpt-4o-mini
+  # Max tokens per analysis
+  max_tokens: 300
+  # Low temperature for consistent analysis
+  temperature: 0.1
+  # Minimum seconds between API calls
+  min_interval_seconds: 1.0
+
 backtest:
   # Number of historical snapshots to simulate
   lookback_snapshots: 200
@@ -81,8 +117,8 @@ backtest:
   fee_pct: 2.0
   # Slippage percentage
   slippage_pct: 1.0
-  # Starting balance
-  starting_balance_usdc: 1000.0
+  # Starting balance (matches real balance)
+  starting_balance_usdc: 200.0
   # Snapshot interval (hours) for simulation
   snapshot_interval_hours: 1
 
