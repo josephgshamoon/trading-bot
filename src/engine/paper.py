@@ -286,5 +286,22 @@ class PaperEngine:
         })
 
         self.risk.initialize_portfolio(self.session.current_balance)
-        logger.info(f"Loaded paper session: {self.session.session_id}")
+
+        # Restore open positions to risk manager so duplicate checks work
+        for pos in self.session.positions:
+            if pos.get("status") == "open":
+                self.risk.portfolio.open_positions.append({
+                    "market_id": pos.get("market_id"),
+                    "question": pos.get("question", ""),
+                    "signal": pos.get("signal", ""),
+                    "entry_price": pos.get("entry_price", 0),
+                    "size_usdc": pos.get("size_usdc", 0),
+                    "trade_id": pos.get("trade_id", ""),
+                })
+
+        open_count = len(self.risk.portfolio.open_positions)
+        logger.info(
+            f"Loaded paper session: {self.session.session_id}, "
+            f"{open_count} open positions restored to risk manager"
+        )
         return True
