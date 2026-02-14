@@ -179,20 +179,24 @@ class PolymarketClient:
     def get_price_history(
         self,
         token_id: str,
+        interval: str = "1d",
         fidelity: int = 60,
-        hours_back: int = 24,
     ) -> list[dict]:
         """Fetch price history for a specific outcome token.
 
-        Uses the CLOB prices-history endpoint.
+        Uses the CLOB /prices-history endpoint.
+        Docs: https://docs.polymarket.com/developers/CLOB/timeseries
+
+        Args:
+            token_id: The CLOB token ID.
+            interval: One of "1h", "6h", "1d", "1w", "max".
+            fidelity: Granularity in minutes.
+
         Returns list of {t: timestamp, p: price} dicts.
         """
-        now = int(time.time())
-        start = now - (hours_back * 3600)
         params = {
-            "tokenID": token_id,
-            "startTs": start,
-            "endTs": now,
+            "market": token_id,
+            "interval": interval,
             "fidelity": fidelity,
         }
         try:
