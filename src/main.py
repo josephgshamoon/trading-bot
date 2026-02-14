@@ -681,13 +681,15 @@ def cmd_fast(config: dict):
             strat = sig.metadata.get("strategy", "unknown")
             print(f"  {i}. [{strat}] {sig}")
 
-        # Execute — limit to 2 trades per cycle
-        max_trades = config.get("short_term", {}).get("max_per_cycle", 2)
-        open_count = len([
+        # Execute — only count short-term positions against the limit
+        max_trades = config.get("short_term", {}).get("max_per_cycle", 6)
+        SHORT_TERM_STRATEGIES = {"crypto_momentum_15m", "tweet_brackets"}
+        open_short_term = len([
             p for p in (engine.session.positions if engine.session else [])
             if p.get("status") == "open"
+            and p.get("metadata", {}).get("strategy") in SHORT_TERM_STRATEGIES
         ])
-        max_new = max(0, max_trades - open_count)
+        max_new = max(0, max_trades - open_short_term)
 
         executed = 0
         for idx, sig in enumerate(signals):
