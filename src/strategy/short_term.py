@@ -18,6 +18,7 @@ from ..data.event_markets import (
     discover_tweet_events,
 )
 from ..data.crypto_prices import CryptoPriceClient as CryptoPrices
+from ..data.binance_client import BinanceClient
 from .base import TradeSignal, Signal
 
 logger = logging.getLogger("trading_bot.strategy.short_term")
@@ -39,12 +40,14 @@ class CryptoMomentumStrategy:
     - Liquidity is sufficient (>$3K)
     """
 
-    MIN_LIQUIDITY = 1000
-    MIN_EDGE = 0.02  # 2% edge minimum — aggressive for 15-min windows
+    MIN_LIQUIDITY = 1000  # SOL slots often have lower liquidity
+    MIN_EDGE = 0.001  # Near-zero — always trade, let Binance TA pick direction
 
     def __init__(self, config: dict):
         self.config = config
         self.crypto_prices = CryptoPrices()
+        self.binance = BinanceClient()
+        self._last_ta: dict | None = None  # Last technical analysis for logging
         self.position_pct = config.get("short_term", {}).get(
             "position_pct", 0.05
         )  # 5% of balance per trade
@@ -54,7 +57,7 @@ class CryptoMomentumStrategy:
     ) -> list[TradeSignal]:
         """Evaluate all upcoming 15-min slots and return signals."""
         if coins is None:
-            coins = ["btc", "eth", "sol"]
+            coins = ["sol"]  # Focus exclusively on Solana
 
         signals = []
 
@@ -78,23 +81,48 @@ class CryptoMomentumStrategy:
         if not slots:
             return None
 
-        # Separate into recent (resolved/active) and upcoming
+        # Separate slots into categories
         now = time.time()
         recent = [s for s in slots if s.start_ts + 900 <= now]
-        upcoming = [s for s in slots if s.is_upcoming and s.liquidity >= self.MIN_LIQUIDITY]
 
-        if not upcoming:
-            logger.debug(f"{coin}: no upcoming slots with sufficient liquidity")
-            return None
+        # Target the ACTIVE slot (just started, first few minutes)
+        # instead of upcoming slots. This way we wait for the previous
+        # 15-min candle to close before deciding direction.
+        active = [
+            s for s in slots
+            if s.start_ts <= now < s.start_ts + 900  # currently running
+            and now - s.start_ts < 180  # only first 3 minutes (good pricing)
+            and s.liquidity >= self.MIN_LIQUIDITY
+        ]
 
-        target = upcoming[0]  # Next upcoming slot
+        if not active:
+            # Fallback: if no active slot in its first 3 min, check upcoming
+            # that start within 60 seconds (about to begin, candle nearly closed)
+            upcoming = [
+                s for s in slots
+                if s.is_upcoming
+                and s.start_ts - now < 60  # starts within 1 min
+                and s.liquidity >= self.MIN_LIQUIDITY
+            ]
+            if not upcoming:
+                logger.debug(f"{coin}: no tradeable slots (waiting for candle close)")
+                return None
+            target = upcoming[0]
+        else:
+            target = active[0]
+
+        logger.info(
+            f"{coin.upper()}: targeting {target.slug} "
+            f"(started {now - target.start_ts:.0f}s ago)"
+        )
 
         # Calculate momentum from recent resolved windows
         momentum_score = self._calculate_momentum(coin, recent)
 
-        if abs(momentum_score) < 0.05:
-            logger.debug(
-                f"{coin}: momentum too weak ({momentum_score:.2f}), skipping"
+        # Wait for a clear signal — don't trade neutral/coin-flip situations
+        if abs(momentum_score) < 0.03:
+            logger.info(
+                f"{coin}: signal too weak ({momentum_score:+.3f}), waiting for clearer entry"
             )
             return None
 
@@ -102,29 +130,38 @@ class CryptoMomentumStrategy:
         if momentum_score > 0:
             # Bullish momentum — bet UP
             direction = "up"
-            our_prob = 0.5 + (momentum_score * 0.25)  # Convert to probability
+            our_prob = 0.5 + (abs(momentum_score) * 0.30)
             market_price = target.up_price
             token_id = target.up_token_id
         else:
             # Bearish momentum — bet DOWN
             direction = "down"
-            our_prob = 0.5 + (abs(momentum_score) * 0.25)
+            our_prob = 0.5 + (abs(momentum_score) * 0.30)
             market_price = target.down_price
             token_id = target.down_token_id
 
-        # Cap our estimated probability
-        our_prob = min(0.72, our_prob)
+        # Cap probability — don't get overconfident
+        our_prob = min(0.70, our_prob)
 
         edge = our_prob - market_price
-        if edge < self.MIN_EDGE:
+        # Always trade every slot — even if edge is small or slightly negative.
+        # If the market is ahead of our estimate, we still trust Binance TA
+        # for direction, just size down.
+        if edge < -0.10:
+            # Only skip if the market strongly disagrees (>10% against us)
             logger.debug(
-                f"{coin}: edge too small ({edge:.3f}), "
-                f"our_prob={our_prob:.3f} market={market_price:.3f}"
+                f"{coin}: market strongly against us ({edge:.3f}), skipping"
             )
             return None
+        # Floor edge at a tiny positive for signal generation
+        edge = max(0.005, edge)
 
-        # Position sizing — conservative for 15-min markets
-        size_usdc = balance * self.position_pct
+        # Position sizing — fewer trades, bigger size
+        # Strong signal (momentum > 0.3): 8% of balance
+        # Weak signal: 4% of balance
+        conviction = min(1.0, abs(momentum_score) / 0.3)
+        size_pct = 0.04 + 0.04 * conviction  # 4-8% of balance
+        size_usdc = balance * size_pct
         size_usdc = min(size_usdc, target.liquidity * 0.1)  # Max 10% of liquidity
         size_usdc = max(5.0, size_usdc)  # Minimum $5
 
@@ -165,15 +202,84 @@ class CryptoMomentumStrategy:
     def _calculate_momentum(
         self, coin: str, recent_slots: list[UpDownSlot]
     ) -> float:
-        """Calculate momentum score from recent resolved windows.
+        """Calculate momentum from Binance technical analysis.
 
-        Also incorporates real-time crypto price trend from CoinGecko.
+        Primary data: Binance 1-min candles with RSI, VWAP, volume.
+        Secondary: slot outcomes for market-specific confirmation.
+        Fallback: CoinGecko if Binance fails.
 
         Returns: float in [-1, 1], positive = bullish, negative = bearish.
         """
         score = 0.0
 
-        # 1. Slot-based momentum: check resolved window outcomes
+        # 1. Binance technical analysis (primary — weight: 0.70)
+        ta = None
+        try:
+            ta = self.binance.get_technical_analysis(coin)
+        except Exception as e:
+            logger.warning(f"Binance TA failed for {coin}: {e}")
+
+        if ta:
+            self._last_ta = ta
+
+            # RSI component (weight: 0.20) — mean reversion + trend
+            rsi = ta["rsi_14"]
+            if rsi <= 25:
+                score += 0.20   # Deeply oversold → likely bounce UP
+            elif rsi <= 35:
+                score += 0.10
+            elif rsi >= 75:
+                score -= 0.20   # Deeply overbought → likely pullback DOWN
+            elif rsi >= 65:
+                score -= 0.10
+
+            # VWAP component (weight: 0.10) — institutional trend
+            vwap_dist = (ta["price"] - ta["vwap"]) / ta["vwap"] * 100 if ta["vwap"] > 0 else 0
+            score += max(-0.10, min(0.10, vwap_dist * 0.05))
+
+            # 5-min trend (weight: 0.20) — immediate momentum
+            score += max(-0.20, min(0.20, ta["trend_5m"] / 0.3 * 0.20))
+
+            # 15-min trend (weight: 0.10) — confirms direction
+            score += max(-0.10, min(0.10, ta["trend_15m"] / 0.5 * 0.10))
+
+            # 1-hour trend (weight: 0.05) — broader context
+            score += max(-0.05, min(0.05, ta["trend_1h"] / 1.0 * 0.05))
+
+            # Volume confirmation (weight: 0.05) — amplify when volume agrees
+            if ta["volume_ratio"] > 1.5 and abs(ta["trend_5m"]) > 0.03:
+                direction = 1.0 if ta["trend_5m"] > 0 else -1.0
+                score += direction * 0.05
+
+            logger.info(
+                f"{coin.upper()} Binance: ${ta['price']:.2f} "
+                f"RSI={ta['rsi_14']:.0f}({ta['rsi_signal']}) "
+                f"VWAP=${ta['vwap']:.2f}({ta['price_vs_vwap']}) "
+                f"S=${ta['support']:.2f}/R=${ta['resistance']:.2f} "
+                f"Vol={ta['volume_ratio']}x({ta['volume_trend']}) "
+                f"5m={ta['trend_5m']:+.3f}% 15m={ta['trend_15m']:+.3f}% "
+                f"1h={ta['trend_1h']:+.3f}% "
+                f"Signal: {ta['signal_strength']}"
+            )
+        else:
+            # Fallback to CoinGecko multi-timeframe
+            try:
+                coin_id_map = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana"}
+                coin_id = coin_id_map.get(coin, coin)
+                mtf = self.crypto_prices.get_multi_timeframe(coin_id)
+                if mtf:
+                    self._last_mtf = mtf
+                    t30 = mtf["trend_30m"]["change_pct"]
+                    score += max(-0.35, min(0.35, t30 / 1.0 * 0.35))
+                    t4h = mtf["trend_4h"]["change_pct"]
+                    score += max(-0.20, min(0.20, t4h / 3.0 * 0.20))
+                    t24h = mtf["trend_24h"]["change_pct"]
+                    score += max(-0.10, min(0.10, t24h / 5.0 * 0.10))
+                    logger.info(f"{coin.upper()} CoinGecko fallback: 30m={t30:+.3f}% 4h={t4h:+.3f}%")
+            except Exception as e:
+                logger.warning(f"CoinGecko fallback also failed: {e}")
+
+        # 2. Slot-based momentum (weight: 0.15) — market-specific confirmation
         if recent_slots:
             recent_sorted = sorted(recent_slots, key=lambda s: s.start_ts, reverse=True)
             consecutive = 0
@@ -185,7 +291,7 @@ class CryptoMomentumStrategy:
                 elif slot.up_price < 0.3:
                     dir_ = "down"
                 else:
-                    break  # Ambiguous
+                    break
 
                 if last_dir is None:
                     last_dir = dir_
@@ -195,29 +301,18 @@ class CryptoMomentumStrategy:
                 else:
                     break
 
-            if consecutive >= 1:
+            if consecutive >= 2:
                 direction_mult = 1.0 if last_dir == "up" else -1.0
-                score += direction_mult * min(1.0, consecutive * 0.25)
+                slot_score = direction_mult * min(1.0, consecutive * 0.25)
+                score += slot_score * 0.15
 
-        # 2. Real-time price momentum from CoinGecko
-        try:
-            coin_id_map = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana"}
-            coin_id = coin_id_map.get(coin, coin)
-
-            vol_data = self.crypto_prices.get_volatility(coin_id, days=1)
-            if vol_data:
-                current = vol_data["current_price"]
-                high = vol_data["period_high"]
-                low = vol_data["period_low"]
-
-                if high > low:
-                    # Position within today's range (0=at low, 1=at high)
-                    range_pos = (current - low) / (high - low)
-                    # Convert to momentum: >0.7 = bullish, <0.3 = bearish
-                    price_momentum = (range_pos - 0.5) * 2
-                    score += price_momentum * 0.4  # Weight
-        except Exception as e:
-            logger.debug(f"CoinGecko momentum check failed: {e}")
+                # Log conflict but don't penalize — Binance real-time data
+                # is more current than resolved slot history
+                if ta and slot_score * score < 0:
+                    logger.info(
+                        f"{coin.upper()} Note: Binance vs slots disagree "
+                        f"(score={score:+.3f}). Trusting Binance."
+                    )
 
         return max(-1.0, min(1.0, score))
 
@@ -245,14 +340,14 @@ class TweetBracketStrategy:
     DAILY_RATE_MEAN = 55
     DAILY_RATE_STD = 25
 
-    MIN_EDGE = 0.02
-    MIN_LIQUIDITY = 1000
+    MIN_EDGE = 0.10  # 10% edge minimum — only high-conviction bracket bets
+    MIN_LIQUIDITY = 3000
 
     def __init__(self, config: dict):
         self.config = config
         self.position_pct = config.get("short_term", {}).get(
-            "tweet_position_pct", 0.03
-        )  # 3% of balance per bracket
+            "tweet_position_pct", 0.02
+        )  # 2% of balance per bracket — conservative
 
     def evaluate_events(self, balance: float) -> list[TradeSignal]:
         """Evaluate all active Elon tweet events and return signals."""
@@ -431,24 +526,24 @@ class ShortTermStrategy:
         self.tweets = TweetBracketStrategy(config)
 
     def evaluate_all(self, balance: float) -> list[TradeSignal]:
-        """Run all short-term strategies and return combined signals."""
+        """Run all short-term strategies and return combined signals.
+
+        Currently focused exclusively on SOL 15-min momentum.
+        Tweet brackets are paused for new entries (existing positions
+        still monitored for resolution and profit-taking).
+        """
         signals = []
 
-        logger.info("Evaluating 15-min crypto momentum...")
+        logger.info("Evaluating 15-min SOL momentum...")
         try:
             crypto_signals = self.crypto.evaluate_slots(balance)
             signals.extend(crypto_signals)
-            logger.info(f"Crypto momentum: {len(crypto_signals)} signals")
+            logger.info(f"SOL momentum: {len(crypto_signals)} signals")
         except Exception as e:
-            logger.error(f"Crypto momentum evaluation failed: {e}")
+            logger.error(f"SOL momentum evaluation failed: {e}")
 
-        logger.info("Evaluating Elon tweet brackets...")
-        try:
-            tweet_signals = self.tweets.evaluate_events(balance)
-            signals.extend(tweet_signals)
-            logger.info(f"Tweet brackets: {len(tweet_signals)} signals")
-        except Exception as e:
-            logger.error(f"Tweet bracket evaluation failed: {e}")
+        # Tweet brackets paused — existing positions still monitored
+        # in cmd_fast() resolution passes
 
         # Sort all by edge
         signals.sort(key=lambda s: s.edge, reverse=True)

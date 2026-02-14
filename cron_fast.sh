@@ -7,6 +7,22 @@
 
 PROJECT_DIR="$HOME/polymarket-bot/trading-bot"
 cd "$PROJECT_DIR" || exit 1
+
+# ── Lockfile — prevent concurrent runs ──────────────────────────
+LOCKFILE="$PROJECT_DIR/.fast_cycle.lock"
+if [ -f "$LOCKFILE" ]; then
+    LOCK_PID=$(cat "$LOCKFILE" 2>/dev/null)
+    if kill -0 "$LOCK_PID" 2>/dev/null; then
+        echo "[$(date)] Skipping — previous cycle still running (PID $LOCK_PID)"
+        exit 0
+    else
+        echo "[$(date)] Stale lock removed (PID $LOCK_PID no longer running)"
+        rm -f "$LOCKFILE"
+    fi
+fi
+echo $$ > "$LOCKFILE"
+trap "rm -f '$LOCKFILE'" EXIT
+
 source venv/bin/activate
 
 if [ -f .env ]; then

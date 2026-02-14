@@ -630,34 +630,66 @@ def cmd_fast(config: dict):
         engine.start_session("short_term", balance)
         print(f"  New session: ${balance:.2f}")
 
+    # ── Position cleanup — remove ghost positions ──────────────
+    if engine.session:
+        ghosts = [
+            p for p in engine.session.positions
+            if p.get("status") != "open"
+        ]
+        if ghosts:
+            for g in ghosts:
+                logger.warning(
+                    f"Cleaning ghost position: {g.get('trade_id')} "
+                    f"status={g.get('status')}"
+                )
+                engine.session.closed_trades.append(g)
+            engine.session.positions = [
+                p for p in engine.session.positions
+                if p.get("status") == "open"
+            ]
+            engine._save_session()
+
     # ── Resolution checking ──────────────────────────────────────
     resolved_count = 0
 
     if engine.session and engine.session.positions:
         now_ts = time.time()
 
+        # Pass 1: Resolve 15-min crypto positions by time
         for pos in list(engine.session.positions):
             if pos.get("status") != "open":
                 continue
-
             meta = pos.get("metadata", {})
-            strategy_name = meta.get("strategy", "")
-
-            # 15-min crypto: resolve by time + re-fetch slot price
-            if strategy_name == "crypto_momentum_15m":
-                resolved = _resolve_crypto_position(pos, engine, journal)
-                if resolved:
+            if meta.get("strategy") == "crypto_momentum_15m":
+                if _resolve_crypto_position(pos, engine, journal):
                     resolved_count += 1
 
-            # Tweet brackets: resolve via Gamma API closed check
-            elif strategy_name == "tweet_brackets":
-                try:
-                    client = PolymarketClient(config)
-                    resolved_list = engine.check_and_resolve(client, journal=journal)
-                    resolved_count += len(resolved_list)
-                    break  # check_and_resolve handles all positions
-                except Exception as e:
-                    logger.error(f"Tweet bracket resolution error: {e}")
+        # Pass 2: Resolve tweet brackets via CLOB orderbook price
+        for pos in list(engine.session.positions):
+            if pos.get("status") != "open":
+                continue
+            meta = pos.get("metadata", {})
+            if meta.get("strategy") == "tweet_brackets":
+                if _resolve_tweet_position(pos, engine, journal, config):
+                    resolved_count += 1
+
+        # Pass 3: Resolve news_enhanced positions via numeric Gamma ID
+        has_gamma_positions = any(
+            p.get("status") == "open"
+            and p.get("metadata", {}).get("strategy") == "news_enhanced"
+            and not p.get("market_id", "").startswith("0x")
+            for p in engine.session.positions
+        )
+        if has_gamma_positions:
+            try:
+                client = PolymarketClient(config)
+                resolved_list = engine.check_and_resolve(client, journal=journal)
+                resolved_count += len(resolved_list)
+            except Exception as e:
+                logger.error(f"Gamma resolution error: {e}")
+
+        # Pass 3: Profit-taking — sell positions that have moved in our favor
+        _check_profit_taking(engine, config, journal)
 
     if resolved_count:
         print(f"\n  {resolved_count} position(s) resolved.")
@@ -668,6 +700,32 @@ def cmd_fast(config: dict):
 
     print(f"\nScanning short-term markets...")
     signals = strategy.evaluate_all(balance)
+
+    # Print Binance technical analysis if available
+    ta = getattr(strategy.crypto, '_last_ta', None)
+    if ta:
+        print(
+            f"\n  SOL ${ta['price']:.2f} | "
+            f"RSI={ta['rsi_14']:.0f}({ta['rsi_signal']}) | "
+            f"VWAP=${ta['vwap']:.2f}({ta['price_vs_vwap']}) | "
+            f"Vol={ta['volume_ratio']}x | "
+            f"{ta['signal_strength'].upper()}"
+        )
+        print(
+            f"  S=${ta['support']:.2f} R=${ta['resistance']:.2f} | "
+            f"5m={ta['trend_5m']:+.3f}% 15m={ta['trend_15m']:+.3f}% "
+            f"1h={ta['trend_1h']:+.3f}% 4h={ta['trend_4h']:+.3f}%"
+        )
+    else:
+        # Fallback to CoinGecko display
+        mtf = getattr(strategy.crypto, '_last_mtf', None)
+        if mtf:
+            print(
+                f"\n  SOL ${mtf['current_price']:.2f} | "
+                f"30m: {mtf['trend_30m']['change_pct']:+.2f}% | "
+                f"4h: {mtf['trend_4h']['change_pct']:+.2f}% | "
+                f"Bias: {mtf['bias'].upper()}"
+            )
 
     # Track all signals for journal (executed + skipped)
     cycle_signals: list[dict] = []
@@ -681,15 +739,15 @@ def cmd_fast(config: dict):
             strat = sig.metadata.get("strategy", "unknown")
             print(f"  {i}. [{strat}] {sig}")
 
-        # Execute — only count short-term positions against the limit
-        max_trades = config.get("short_term", {}).get("max_per_cycle", 6)
-        SHORT_TERM_STRATEGIES = {"crypto_momentum_15m", "tweet_brackets"}
-        open_short_term = len([
+        # Execute — count only crypto momentum positions against the limit
+        # (existing tweet bracket positions shouldn't block new SOL trades)
+        max_crypto = config.get("short_term", {}).get("max_crypto_positions", 2)
+        open_crypto = len([
             p for p in (engine.session.positions if engine.session else [])
             if p.get("status") == "open"
-            and p.get("metadata", {}).get("strategy") in SHORT_TERM_STRATEGIES
+            and p.get("metadata", {}).get("strategy") == "crypto_momentum_15m"
         ])
-        max_new = max(0, max_trades - open_short_term)
+        max_new = max(0, max_crypto - open_crypto)
 
         executed = 0
         for idx, sig in enumerate(signals):
@@ -710,7 +768,25 @@ def cmd_fast(config: dict):
                 cycle_signals.append(sig_record)
                 continue
 
-            if idx >= max_new:
+            # Skip if we already have a position in this market
+            # EXCEPTION: crypto_momentum_15m allows scaling (adding to same slot)
+            is_crypto = sig.metadata.get("strategy") == "crypto_momentum_15m"
+            existing_markets = set()
+            if engine.session:
+                for p in engine.session.positions:
+                    if p.get("status") == "open":
+                        existing_markets.add(p.get("market_id"))
+                if not is_crypto:
+                    # Only check closed trades for non-crypto (crypto slots are unique anyway)
+                    for p in engine.session.closed_trades:
+                        existing_markets.add(p.get("market_id"))
+            if sig.market_id in existing_markets and not is_crypto:
+                sig_record["action"] = "skipped"
+                sig_record["skip_reason"] = "already have position"
+                cycle_signals.append(sig_record)
+                continue
+
+            if executed >= max_new:
                 sig_record["action"] = "skipped"
                 sig_record["skip_reason"] = "max trades per cycle"
                 cycle_signals.append(sig_record)
@@ -735,19 +811,30 @@ def cmd_fast(config: dict):
 
         print(f"\nExecuted {executed} short-term trades.")
 
+    # ── Balance reconciliation ──────────────────────────────────
+    # Sync session balance with on-chain to prevent drift
+    onchain_balance = engine.get_balance()
+    if engine.session and abs(engine.session.current_balance - onchain_balance) > 1.0:
+        logger.info(
+            f"Balance reconciliation: session=${engine.session.current_balance:.2f} "
+            f"vs on-chain=${onchain_balance:.2f}"
+        )
+        engine.session.current_balance = onchain_balance
+        engine._save_session()
+
     # ── Log cycle to journal ─────────────────────────────────────
     open_count = len([
         p for p in (engine.session.positions if engine.session else [])
         if p.get("status") == "open"
     ])
     journal.log_cycle(
-        balance=engine.get_balance(),
+        balance=onchain_balance,
         signals=cycle_signals,
         open_positions=open_count,
         strategy="short_term",
     )
 
-    print(f"\n  Balance: ${engine.get_balance():.2f}")
+    print(f"\n  Balance: ${onchain_balance:.2f}")
 
 
 def _resolve_crypto_position(pos: dict, engine, journal) -> bool:
@@ -758,6 +845,10 @@ def _resolve_crypto_position(pos: dict, engine, journal) -> bool:
     """
     import time
     logger = logging.getLogger("trading_bot")
+
+    if not engine.session:
+        logger.warning("Cannot resolve crypto position — no session loaded")
+        return False
 
     meta = pos.get("metadata", {})
     slot_start = meta.get("slot_start", 0)
@@ -792,17 +883,25 @@ def _resolve_crypto_position(pos: dict, engine, journal) -> bool:
         return False
 
     # Determine outcome from final price
-    # up_price > 0.7 means UP won, up_price < 0.3 means DOWN won
+    # Tighter thresholds after 5+ min past slot end for faster resolution
     up_price = target_slot.up_price
-    if 0.3 <= up_price <= 0.7:
+    elapsed_since_end = now_ts - (slot_start + 900)
+    if elapsed_since_end > 300:
+        # 5+ min past end: loosen to 0.60/0.40 — outcome is clear by now
+        threshold_hi, threshold_lo = 0.60, 0.40
+    else:
+        threshold_hi, threshold_lo = 0.70, 0.30
+
+    if threshold_lo <= up_price <= threshold_hi:
         # Not yet clearly resolved — skip
         return False
 
     direction = meta.get("direction", "up")
+    actual_direction = "up" if up_price > (threshold_hi - 0.01) else "down"
     if direction == "up":
-        won = up_price > 0.7
+        won = up_price > (threshold_hi - 0.01)
     else:
-        won = up_price < 0.3
+        won = up_price < (threshold_lo + 0.01)
 
     if won:
         pnl = pos.get("shares", 0) * 1.0 - pos.get("size_usdc", 0)
@@ -818,20 +917,39 @@ def _resolve_crypto_position(pos: dict, engine, journal) -> bool:
     pos["pnl"] = round(pnl, 4)
     pos["exit_time"] = datetime.now(timezone.utc).isoformat()
 
-    engine.risk.record_trade_exit(pos.get("market_id", ""), pnl)
+    # ── Analysis ───────────────────────────────────────────────
+    momentum = meta.get("momentum_score", 0)
+    entry_price = pos.get("entry_price", 0)
+    market_price = meta.get("market_price", 0.5)
+    edge = pos.get("edge", 0)
+    roi = (pnl / pos.get("size_usdc", 1)) * 100
+
+    analysis = (
+        f"Bet {coin.upper()} {direction.upper()} | Actual: {actual_direction.upper()}\n"
+        f"Momentum: {momentum:+.2f} | Edge: {edge:.3f} | Entry: ${entry_price:.3f}\n"
+    )
+    if won:
+        analysis += f"Signal was correct. ROI: {roi:+.0f}%"
+    else:
+        if direction != actual_direction:
+            analysis += f"Wrong direction — momentum said {direction.upper()} but {coin.upper()} went {actual_direction.upper()}"
+        else:
+            analysis += f"Direction correct but didn't resolve cleanly"
+
+    pos["analysis"] = analysis
+
+    engine.risk.record_trade_exit(pos.get("trade_id", pos.get("market_id", "")), pnl)
     if engine.session:
         engine.session.total_pnl += pnl
         engine.session.current_balance = engine.risk.portfolio.balance
         engine.session.closed_trades.append(pos)
-        # Remove from open positions list
         engine.session.positions = [
             p for p in engine.session.positions
             if p.get("trade_id") != pos.get("trade_id")
         ]
         engine._save_session()
 
-    # Log resolution to journal
-    entry_price = pos.get("entry_price", 0)
+    # Log resolution to journal with analysis
     predicted_prob = meta.get("market_price", entry_price)
     journal.log_resolution(
         trade_id=pos.get("trade_id", ""),
@@ -841,31 +959,236 @@ def _resolve_crypto_position(pos: dict, engine, journal) -> bool:
         signal=pos.get("signal", ""),
         entry_price=entry_price,
         predicted_prob=predicted_prob,
-        predicted_edge=pos.get("edge", 0),
+        predicted_edge=edge,
         outcome=pos["status"],
         pnl=pnl,
         size_usdc=pos.get("size_usdc", 0),
-        metadata=meta,
+        metadata={**meta, "analysis": analysis},
     )
 
     logger.info(
-        f"Crypto position resolved: {pos.get('trade_id')} "
-        f"{'WON' if won else 'LOST'} pnl=${pnl:+.2f}"
+        f"Crypto resolved: {pos.get('trade_id')} "
+        f"{'WON' if won else 'LOST'} ${pnl:+.2f} | {analysis}"
     )
 
-    # Send Telegram notification
+    # Send Telegram notification with analysis
     from .notifications.telegram import TelegramNotifier
     notifier = TelegramNotifier()
     if notifier.is_configured():
         emoji = "\U0001f389" if won else "\U0001f4a5"
         notifier.send_message(
-            f"{emoji} <b>Crypto Position Resolved: {'WON' if won else 'LOST'}</b>\n\n"
-            f"<b>{pos.get('question', '')}</b>\n"
-            f"P&L: <code>${pnl:+.2f}</code>\n"
-            f"ID: <code>{pos.get('trade_id', '')}</code>"
+            f"{emoji} <b>${pnl:+.2f}</b> {coin.upper()} {direction.upper()}\n"
+            f"Actual: {actual_direction.upper()} | Mom: {momentum:+.2f}\n"
+            f"{'Correct call' if won else 'Wrong direction'} | ROI: {roi:+.0f}%"
         )
 
     return True
+
+
+def _resolve_tweet_position(pos: dict, engine, journal, config: dict) -> bool:
+    """Resolve a tweet bracket position — CONSERVATIVE approach.
+
+    Only auto-resolves when there is VERY strong evidence of a win
+    (best bid > 0.95). Never auto-marks losses — those are handled
+    by on-chain settlement when the event period ends.
+
+    For neg_risk tweet bracket markets, low asks with no bids can mean
+    EITHER a win (tokens being redeemed) or a loss (tokens worthless),
+    so we don't resolve on that signal alone.
+    """
+    logger = logging.getLogger("trading_bot")
+
+    if not engine.session:
+        logger.warning("Cannot resolve tweet position — no session loaded")
+        return False
+
+    token_id = pos.get("token_id", "")
+    if not token_id:
+        return False
+
+    client = PolymarketClient(config)
+    try:
+        book = client.get_orderbook(token_id)
+    except Exception as e:
+        logger.debug(f"Could not fetch orderbook for {pos.get('trade_id')}: {e}")
+        return False
+
+    bids = book.get("bids", [])
+    asks = book.get("asks", [])
+
+    best_bid = max(float(b["price"]) for b in bids) if bids else 0.0
+    best_ask = min(float(a["price"]) for a in asks) if asks else 1.0
+
+    # ONLY resolve as WIN when best bid is very high (clear resolution)
+    if best_bid <= 0.95:
+        return False
+
+    # Clear win — best bid > 0.95 means market is near-certain YES
+    won = True
+    # Only wins reach here
+    pnl = pos.get("shares", 0) * 1.0 - pos.get("size_usdc", 0)
+    pos["status"] = "won"
+    if engine.session:
+        engine.session.wins += 1
+
+    pos["pnl"] = round(pnl, 4)
+    pos["exit_time"] = datetime.now(timezone.utc).isoformat()
+
+    engine.risk.record_trade_exit(pos.get("trade_id", pos.get("market_id", "")), pnl)
+    if engine.session:
+        engine.session.total_pnl += pnl
+        engine.session.current_balance = engine.risk.portfolio.balance
+        engine.session.closed_trades.append(pos)
+        engine.session.positions = [
+            p for p in engine.session.positions
+            if p.get("trade_id") != pos.get("trade_id")
+        ]
+        engine._save_session()
+
+    meta = pos.get("metadata", {})
+    entry_price = pos.get("entry_price", 0)
+
+    if journal:
+        journal.log_resolution(
+            trade_id=pos.get("trade_id", ""),
+            market_id=pos.get("market_id", ""),
+            question=pos.get("question", ""),
+            strategy="tweet_brackets",
+            signal=pos.get("signal", ""),
+            entry_price=entry_price,
+            predicted_prob=meta.get("model_prob", entry_price),
+            predicted_edge=pos.get("edge", 0),
+            outcome=pos["status"],
+            pnl=pnl,
+            size_usdc=pos.get("size_usdc", 0),
+            metadata=meta,
+        )
+
+    logger.info(
+        f"Tweet position resolved: {pos.get('trade_id')} "
+        f"{'WON' if won else 'LOST'} pnl=${pnl:+.2f} "
+        f"(bid={best_bid:.3f} ask={best_ask:.3f})"
+    )
+
+    from .notifications.telegram import TelegramNotifier
+    notifier = TelegramNotifier()
+    if notifier.is_configured():
+        emoji = "\U0001f389" if won else "\U0001f4a5"
+        q = pos.get('question', '')[:45]
+        notifier.send_message(
+            f"{emoji} {'WON' if won else 'LOST'} <b>${pnl:+.2f}</b> | {q}"
+        )
+
+    return True
+
+
+def _check_profit_taking(engine, config: dict, journal):
+    """Check open positions for profit-taking opportunities.
+
+    Sells positions where the current market price has moved significantly
+    in our favor. This locks in profit rather than waiting for full
+    resolution (which could be days for tweet brackets).
+
+    Thresholds:
+    - Crypto 15-min: sell when market price hits 0.95 (lock in ~90% profit)
+    - Tweet brackets: sell if >80% of max profit captured or >15% ROI
+    """
+    import time
+    logger = logging.getLogger("trading_bot")
+
+    if not engine.session or not engine._clob:
+        return
+
+    client = PolymarketClient(config)
+
+    for pos in list(engine.session.positions):
+        if pos.get("status") != "open":
+            continue
+
+        meta = pos.get("metadata", {})
+        strategy = meta.get("strategy", "")
+
+        token_id = pos.get("token_id", "")
+        if not token_id:
+            continue
+
+        # Get current market price for our token
+        try:
+            book = client.get_orderbook(token_id)
+            bids = book.get("bids", [])
+            if not bids:
+                continue
+            # Best bid = what we'd get if we sell now
+            current_bid = max(float(b.get("price", 0)) for b in bids)
+        except Exception as e:
+            logger.debug(f"Could not fetch orderbook for {pos.get('trade_id')}: {e}")
+            continue
+
+        entry_price = pos.get("entry_price", 0)
+        if entry_price <= 0:
+            continue
+
+        # Calculate potential profit
+        # If we sell at current_bid: proceeds = shares * current_bid
+        # Cost was size_usdc
+        shares = pos.get("shares", 0)
+        cost = pos.get("size_usdc", 0)
+        proceeds = shares * current_bid
+        potential_pnl = proceeds - cost
+        roi = potential_pnl / cost if cost > 0 else 0
+
+        # Max possible profit = shares * 1.0 - cost (if market resolves in our favor)
+        max_profit = shares * 1.0 - cost
+        profit_captured = potential_pnl / max_profit if max_profit > 0 else 0
+
+        # Profit-taking conditions vary by strategy:
+        if strategy == "crypto_momentum_15m":
+            # CRYPTO: cash out at 80%+ ROI — lock in profit, move to next slot
+            # e.g., bought at $0.50, bid now at $0.90 → 80% return → sell
+            should_sell = roi >= 0.80 and potential_pnl > 0.10
+        else:
+            # NON-CRYPTO: sell if >80% of max profit captured or >15% ROI
+            should_sell = (roi > 0.15 and potential_pnl > 0.50) or (profit_captured > 0.80 and potential_pnl > 0.50)
+
+        if should_sell:
+            # ── Analysis ──────────────────────────────────
+            direction = meta.get("direction", "?")
+            momentum = meta.get("momentum_score", 0)
+            coin = meta.get("coin", "?")
+            analysis = (
+                f"Early exit at {roi:.0f}% ROI | Entry ${entry_price:.3f} -> Bid ${current_bid:.3f}\n"
+                f"Momentum was {momentum:+.2f} ({direction.upper()}) — signal correct, taking profit"
+            )
+
+            logger.info(
+                f"Profit-taking: {pos.get('trade_id')} | "
+                f"ROI={roi:.1%} | {analysis}"
+            )
+            result = engine.sell_position(pos, current_bid)
+            if result.get("status") == "sold":
+                actual_pnl = result.get("pnl", 0)
+                actual_roi = (actual_pnl / cost * 100) if cost > 0 else 0
+                print(
+                    f"  >> PROFIT TAKEN: {pos.get('trade_id')} | "
+                    f"${actual_pnl:+.2f} ({actual_roi:.0f}% ROI)"
+                )
+                if journal:
+                    journal.log_resolution(
+                        trade_id=pos.get("trade_id", ""),
+                        market_id=pos.get("market_id", ""),
+                        question=pos.get("question", ""),
+                        strategy=strategy,
+                        signal=pos.get("signal", ""),
+                        entry_price=entry_price,
+                        predicted_prob=meta.get("model_prob", entry_price),
+                        predicted_edge=pos.get("edge", 0),
+                        outcome="sold_profit",
+                        pnl=actual_pnl,
+                        size_usdc=cost,
+                        metadata={**meta, "exit_type": "profit_taking", "roi": actual_roi, "analysis": analysis},
+                    )
+            else:
+                logger.warning(f"Profit-taking sell failed: {result.get('error')}")
 
 
 def cmd_stats(config: dict):

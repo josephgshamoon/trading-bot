@@ -412,8 +412,13 @@ class LiveEngine:
             f"order_id={order_id}"
         )
 
-        # Send Telegram notification
-        if self._notifier.is_configured():
+        # Send Telegram notification — only for first entry into a slot,
+        # not for scale-ins (same market_id already open)
+        is_scale_in = any(
+            p.get("market_id") == signal.market_id and p.get("trade_id") != trade_id
+            for p in self.session.positions if p.get("status") == "open"
+        )
+        if self._notifier.is_configured() and not is_scale_in:
             self._notifier.send_trade_alert({
                 "signal": signal.signal.value,
                 "question": signal.question,
@@ -460,6 +465,12 @@ class LiveEngine:
                 continue
 
             try:
+                # Skip hex conditionId markets — Gamma API returns wrong
+                # markets for these. They must be resolved via CLOB instead.
+                if pos["market_id"].startswith("0x"):
+                    still_open.append(pos)
+                    continue
+
                 market = gamma_client.get_market(pos["market_id"])
                 if not market.get("closed", False):
                     still_open.append(pos)
@@ -486,7 +497,7 @@ class LiveEngine:
                 pos["pnl"] = round(pnl, 4)
                 pos["exit_time"] = datetime.now(timezone.utc).isoformat()
 
-                self.risk.record_trade_exit(pos["market_id"], pnl)
+                self.risk.record_trade_exit(pos.get("trade_id", pos["market_id"]), pnl)
                 self.session.total_pnl += pnl
                 self.session.current_balance = self.risk.portfolio.balance
                 self.session.closed_trades.append(pos)
@@ -525,11 +536,9 @@ class LiveEngine:
                 # Send Telegram notification for resolved position
                 if self._notifier.is_configured():
                     emoji = "\U0001f389" if won else "\U0001f4a5"
+                    q = pos.get('question', '')[:45]
                     self._notifier.send_message(
-                        f"{emoji} <b>Position Resolved: {'WON' if won else 'LOST'}</b>\n\n"
-                        f"<b>{pos.get('question', '')}</b>\n"
-                        f"P&L: <code>${pnl:+.2f}</code>\n"
-                        f"ID: <code>{pos['trade_id']}</code>"
+                        f"{emoji} {'WON' if won else 'LOST'} <b>${pnl:+.2f}</b> | {q}"
                     )
             except Exception as e:
                 logger.error(f"Error checking position {pos.get('trade_id')}: {e}")
@@ -538,6 +547,106 @@ class LiveEngine:
         self.session.positions = still_open
         self._save_session()
         return resolved
+
+    def sell_position(self, pos: dict, sell_price: float) -> dict:
+        """Sell (close) an open position on the CLOB.
+
+        Places a SELL limit order for the token we hold.
+        Returns dict with status, pnl, etc.
+        """
+        if not self._enabled or not self._clob:
+            return {"error": "Live trading is not enabled"}
+
+        token_id = pos.get("token_id", "")
+        shares = pos.get("shares", 0)
+        if not token_id or shares <= 0:
+            return {"error": "Invalid position — no token_id or shares"}
+
+        try:
+            tick_size = float(self._clob.get_tick_size(token_id))
+        except Exception:
+            tick_size = 0.01
+
+        price = round(round(sell_price / tick_size) * tick_size, 4)
+        price = max(tick_size, min(1.0 - tick_size, price))
+
+        try:
+            fee_rate_bps = self._clob.get_fee_rate_bps(token_id)
+        except Exception:
+            fee_rate_bps = 0
+
+        logger.warning(
+            f"SELLING POSITION: {shares:.2f} shares of "
+            f"{pos.get('question', '')[:50]} @ ${price:.4f}"
+        )
+
+        try:
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=shares,
+                side="SELL",
+                fee_rate_bps=fee_rate_bps,
+            )
+
+            signed_order = self._clob.create_order(order_args)
+            response = self._clob.post_order(signed_order, orderType=OrderType.GTC)
+
+            if isinstance(response, dict) and response.get("errorMsg"):
+                logger.error(f"Sell order rejected: {response['errorMsg']}")
+                return {"error": response["errorMsg"]}
+
+            order_id = ""
+            if isinstance(response, dict):
+                order_id = response.get("orderID", response.get("id", ""))
+
+            logger.info(f"Sell order placed: {order_id}")
+
+        except Exception as e:
+            logger.error(f"Sell order failed: {e}")
+            return {"error": str(e)}
+
+        # Calculate PnL: sell proceeds - cost
+        proceeds = shares * price
+        cost = pos.get("size_usdc", 0)
+        pnl = proceeds - cost
+
+        pos["status"] = "sold"
+        pos["pnl"] = round(pnl, 4)
+        pos["exit_time"] = datetime.now(timezone.utc).isoformat()
+        pos["exit_price"] = price
+
+        self.risk.record_trade_exit(pos.get("trade_id", pos.get("market_id", "")), pnl)
+        if self.session:
+            self.session.total_pnl += pnl
+            if pnl >= 0:
+                self.session.wins += 1
+            else:
+                self.session.losses += 1
+            self.session.current_balance = self.risk.portfolio.balance
+            self.session.closed_trades.append(pos)
+            self.session.positions = [
+                p for p in self.session.positions
+                if p.get("trade_id") != pos.get("trade_id")
+            ]
+            self._save_session()
+
+        # Send Telegram notification
+        if self._notifier.is_configured():
+            emoji = "\U0001f4b0" if pnl >= 0 else "\U0001f4a5"
+            q = pos.get('question', '')[:45]
+            roi_pct = (pnl / pos.get('size_usdc', 1)) * 100
+            self._notifier.send_message(
+                f"{emoji} SOLD <b>${pnl:+.2f}</b> ({roi_pct:+.0f}%) | {q}"
+            )
+
+        return {
+            "status": "sold",
+            "trade_id": pos.get("trade_id", ""),
+            "order_id": order_id,
+            "sell_price": price,
+            "pnl": pnl,
+        }
 
     def cancel_all_orders(self) -> dict:
         """Cancel all open orders on the CLOB."""
@@ -583,21 +692,36 @@ class LiveEngine:
         }
 
     def _save_session(self):
-        """Persist session state to disk."""
+        """Persist session state to disk using atomic write.
+
+        Writes to a temp file first, then renames — prevents corruption
+        if two cron cycles overlap or the process is killed mid-write.
+        """
         if not self.session:
             return
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with open(self._session_path, "w") as f:
+        tmp_path = self._session_path.with_suffix(".tmp")
+        with open(tmp_path, "w") as f:
             json.dump(asdict(self.session), f, indent=2, default=str)
+        tmp_path.replace(self._session_path)
 
     def load_session(self) -> bool:
-        """Load an existing session from disk."""
+        """Load an existing session from disk with corruption recovery."""
         if not self._session_path.exists():
             return False
 
-        with open(self._session_path) as f:
-            data = json.load(f)
+        for attempt in range(3):
+            try:
+                with open(self._session_path) as f:
+                    data = json.load(f)
+                break
+            except json.JSONDecodeError:
+                if attempt < 2:
+                    time.sleep(0.3)
+                else:
+                    logger.error("Session file corrupted — cannot load")
+                    return False
 
         self.session = LiveSession(**{
             k: v for k, v in data.items()

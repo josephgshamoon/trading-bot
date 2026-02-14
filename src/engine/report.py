@@ -18,11 +18,17 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 
 def generate_report(config: dict) -> str:
-    """Generate a comprehensive performance report from the paper session."""
-    session_path = DATA_DIR / "paper_session.json"
+    """Generate a comprehensive performance report from the active session."""
+    # Prefer live session, fallback to paper
+    live_path = DATA_DIR / "live_session.json"
+    paper_path = DATA_DIR / "paper_session.json"
 
-    if not session_path.exists():
-        return "No paper session found. Run 'paper' first."
+    if live_path.exists():
+        session_path = live_path
+    elif paper_path.exists():
+        session_path = paper_path
+    else:
+        return "No session found. Run 'live' or 'paper' first."
 
     with open(session_path) as f:
         session = json.load(f)

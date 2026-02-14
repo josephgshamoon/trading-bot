@@ -158,10 +158,12 @@ class RiskManager:
         if signal.position_size_usdc > self.portfolio.balance:
             return False, f"Insufficient balance for ${signal.position_size_usdc} trade"
 
-        # Don't double-up on the same market
-        for pos in self.portfolio.open_positions:
-            if pos.get("market_id") == signal.market_id:
-                return False, f"Already have position in market {signal.market_id}"
+        # Don't double-up on the same market (unless scaling is allowed)
+        is_crypto = getattr(signal, "metadata", {}).get("strategy") == "crypto_momentum_15m"
+        if not is_crypto:
+            for pos in self.portfolio.open_positions:
+                if pos.get("market_id") == signal.market_id:
+                    return False, f"Already have position in market {signal.market_id}"
 
         return True, "OK"
 
@@ -186,12 +188,25 @@ class RiskManager:
             f"on {signal.question[:50]}..."
         )
 
-    def record_trade_exit(self, market_id: str, pnl: float):
-        """Record a trade exit and update stats."""
-        # Remove from open positions
+    def record_trade_exit(self, identifier: str, pnl: float):
+        """Record a trade exit and update stats.
+
+        Args:
+            identifier: trade_id or market_id of the position to close.
+            pnl: realized profit/loss.
+        """
+        # Remove from open positions — match trade_id first, fallback to market_id
+        before_count = len(self.portfolio.open_positions)
         self.portfolio.open_positions = [
-            p for p in self.portfolio.open_positions if p.get("market_id") != market_id
+            p for p in self.portfolio.open_positions
+            if p.get("trade_id") != identifier and p.get("market_id") != identifier
         ]
+        removed = before_count - len(self.portfolio.open_positions)
+        if removed > 1:
+            logger.warning(
+                f"record_trade_exit removed {removed} positions for {identifier} "
+                f"(expected 1) — possible duplicate"
+            )
 
         self.daily.daily_pnl += pnl
         self.portfolio.balance += pnl
@@ -216,7 +231,7 @@ class RiskManager:
             self.daily.consecutive_losses = 0
 
         self.portfolio.trade_history.append({
-            "market_id": market_id,
+            "identifier": identifier,
             "pnl": pnl,
             "balance_after": self.portfolio.balance,
             "timestamp": datetime.now(timezone.utc).isoformat(),

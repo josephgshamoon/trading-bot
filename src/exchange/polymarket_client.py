@@ -90,7 +90,20 @@ class PolymarketClient:
         return self._get(f"{self.gamma_url}/markets", params)
 
     def get_market(self, market_id: str) -> dict:
-        """Fetch a single market by condition ID."""
+        """Fetch a single market by ID or condition ID.
+
+        Gamma API supports numeric IDs via /markets/{id} and
+        condition IDs (0x...) via /markets?condition_id=...
+        """
+        if market_id.startswith("0x"):
+            # Condition ID — use query parameter
+            results = self._get(
+                f"{self.gamma_url}/markets",
+                {"condition_id": market_id},
+            )
+            if isinstance(results, list) and results:
+                return results[0]
+            raise ValueError(f"No market found for condition_id={market_id}")
         return self._get(f"{self.gamma_url}/markets/{market_id}")
 
     def search_markets(self, query: str, limit: int = 20) -> list[dict]:
