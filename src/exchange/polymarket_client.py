@@ -136,6 +136,7 @@ class PolymarketClient:
     def get_filtered_markets(self, config: dict) -> list[dict]:
         """Fetch markets that pass the configured filters.
 
+        Paginates through all available markets on Polymarket.
         Applies: min volume, min liquidity, active only, probability range.
         """
         filters = config.get("filters", {})
@@ -146,11 +147,23 @@ class PolymarketClient:
         active_only = filters.get("active_only", True)
         min_prob = risk.get("min_entry_probability", 0.15)
         max_prob = risk.get("max_entry_probability", 0.85)
+        max_pages = filters.get("max_pages", 5)
 
-        raw_markets = self.get_markets(limit=100, active=active_only)
+        # Paginate through markets
+        all_markets = []
+        page_size = 100
+        for page in range(max_pages):
+            batch = self.get_markets(
+                limit=page_size, offset=page * page_size, active=active_only
+            )
+            if not batch:
+                break
+            all_markets.extend(batch)
+            if len(batch) < page_size:
+                break
+
         filtered = []
-
-        for m in raw_markets:
+        for m in all_markets:
             volume = float(m.get("volume", 0) or 0)
             liquidity = float(m.get("liquidity", 0) or 0)
 
@@ -170,7 +183,7 @@ class PolymarketClient:
             filtered.append(m)
 
         logger.info(
-            f"Filtered {len(filtered)} markets from {len(raw_markets)} total"
+            f"Filtered {len(filtered)} markets from {len(all_markets)} total"
         )
         return filtered
 

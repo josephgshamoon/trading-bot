@@ -28,6 +28,7 @@ from .risk.manager import RiskManager
 def cmd_scan(config: dict):
     """Scan markets for trade signals."""
     logger = logging.getLogger("trading_bot")
+    verbose = config.get("_verbose", False)
 
     client = PolymarketClient(config)
     feed = DataFeed(client)
@@ -55,18 +56,42 @@ def cmd_scan(config: dict):
             except Exception:
                 pass
 
+        if verbose:
+            q = snap["question"][:60]
+            est = MarketIndicators.edge_estimate(
+                snap["yes_price"], snap["volume"], snap["liquidity"],
+                indicators.get("momentum_6", 0.0),
+            )
+            yes_edge = est - snap["yes_price"]
+            no_edge = (1.0 - est) - snap["no_price"]
+            print(
+                f"  {q}...\n"
+                f"    YES={snap['yes_price']:.3f}  NO={snap['no_price']:.3f}  "
+                f"Vol=${snap['volume']:,.0f}  Liq=${snap['liquidity']:,.0f}\n"
+                f"    Est={est:.3f}  YES_edge={yes_edge:+.3f}  "
+                f"NO_edge={no_edge:+.3f}  "
+                f"momentum={indicators.get('momentum_6', 0):.4f}"
+            )
+
         signal = strategy.evaluate(snap, indicators)
         if signal:
             signals.append(signal)
+            if verbose:
+                print(f"    >>> SIGNAL: {signal.signal.value} "
+                      f"edge={signal.edge:.4f} conf={signal.confidence:.2f}")
+        elif verbose:
+            print(f"    --- no signal")
 
     if not signals:
-        print("No trade signals found.")
+        print("\nNo trade signals found.")
+        if not verbose:
+            print("Tip: run with -v to see why each market was skipped.")
         return
 
     # Sort by confidence descending
     signals.sort(key=lambda s: s.confidence, reverse=True)
 
-    print(f"Found {len(signals)} signals:\n")
+    print(f"\nFound {len(signals)} signals:\n")
     for i, sig in enumerate(signals, 1):
         print(f"  {i}. {sig}")
     print()
@@ -283,6 +308,9 @@ Commands:
     # Override strategy if specified
     if args.strategy:
         config.setdefault("strategy", {})["active"] = args.strategy
+
+    # Pass verbose flag into config for scan diagnostics
+    config["_verbose"] = args.verbose
 
     # Route to command
     commands = {
