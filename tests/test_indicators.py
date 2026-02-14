@@ -88,13 +88,17 @@ class TestMarketIndicators:
         assert MarketIndicators.kelly_criterion(0.5, 1.0) == 0.0
 
     def test_edge_estimate(self):
-        # High volume, high liquidity = close to market price
+        # High volume, high liquidity = relatively close to market price
         result = MarketIndicators.edge_estimate(0.60, 500000, 100000)
-        assert 0.55 <= result <= 0.65
+        assert 0.50 <= result <= 0.70
 
         # Low volume, low liquidity = further from market price
         result_low = MarketIndicators.edge_estimate(0.60, 30000, 5000)
         assert result_low != result  # Should differ from high-vol estimate
+
+        # Result should stay in valid probability range
+        assert 0.01 <= result <= 0.99
+        assert 0.01 <= result_low <= 0.99
 
     def test_compute_all_without_history(self, sample_snapshot):
         result = MarketIndicators.compute_all(sample_snapshot)

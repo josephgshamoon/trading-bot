@@ -111,31 +111,43 @@ class MarketIndicators:
         based on volume, liquidity, and momentum signals. It returns an
         estimated 'true' probability.
 
-        Core idea: Low-volume, low-liquidity markets are more likely to be
-        mispriced. Strong momentum suggests the market is correcting.
+        Core ideas:
+        - Low-liquidity markets are more likely mispriced (thin books = noise).
+        - Volume/liquidity ratio signals informed vs uninformed flow.
+        - Momentum suggests the market is still correcting toward fair value.
+        - Spread inefficiency (YES+NO != 1.0) indicates pricing gaps.
         """
         base_prob = yes_price
 
-        # Volume discount: low volume markets have wider confidence intervals
-        # High volume = more efficient = less likely to find edge
-        vol_factor = 1.0
-        if volume < 100_000:
-            vol_factor = 0.95  # Markets with < $100k volume may be inefficient
-        if volume < 50_000:
-            vol_factor = 0.90
+        # Liquidity-adjusted confidence: thin markets have wider mispricings
+        # Use a continuous scale instead of hard cutoffs
+        liq_adj = 0.0
+        if liquidity < 100_000:
+            # Up to 8% adjustment for very thin markets
+            liq_adj = 0.08 * max(0, (100_000 - liquidity)) / 100_000
 
-        # Liquidity penalty: thin markets have more noise
-        liq_factor = 1.0
-        if liquidity < 20_000:
-            liq_factor = 0.97
-        if liquidity < 10_000:
-            liq_factor = 0.93
+        # Volume/liquidity ratio: high ratio = lots of trading vs available
+        # liquidity, suggesting price discovery is active and may overshoot
+        vl_ratio = volume / max(liquidity, 1)
+        vl_adj = 0.0
+        if vl_ratio > 10:
+            # Active markets with thin books tend to overshoot
+            vl_adj = min(0.04, (vl_ratio - 10) * 0.002)
 
-        # Momentum adjustment: if price is moving strongly in one direction,
-        # the "true" probability may be further in that direction
-        momentum_adj = momentum * 0.3  # Dampen momentum signal
+        # Momentum: if price is trending, true value is likely further ahead
+        momentum_adj = momentum * 0.5
 
-        adjusted = base_prob * vol_factor * liq_factor + momentum_adj
+        # Direction of adjustment depends on price level:
+        # - Prices near extremes (0.1 or 0.9) more likely to be mispriced
+        #   toward the center (mean reversion at extremes)
+        # - Prices near 0.5 more likely to be pushed by momentum
+        extreme_factor = abs(base_prob - 0.5) * 2  # 0 at center, 1 at extremes
+        mean_reversion = extreme_factor * 0.03  # Pull toward 0.5
+
+        if base_prob > 0.5:
+            adjusted = base_prob - liq_adj - mean_reversion + momentum_adj - vl_adj
+        else:
+            adjusted = base_prob + liq_adj + mean_reversion + momentum_adj + vl_adj
 
         # Clamp to valid probability range
         return max(0.01, min(0.99, adjusted))

@@ -43,14 +43,14 @@ strategy:
 
   value_betting:
     # Minimum edge (difference between our estimate and market price)
-    min_edge: 0.05
+    min_edge: 0.03
     # Minimum volume in USD for market consideration
-    min_volume_usd: 50000
+    min_volume_usd: 10000
     # Minimum liquidity in USD
-    min_liquidity_usd: 10000
-    # Probability sweet spot range
-    prob_range_low: 0.20
-    prob_range_high: 0.80
+    min_liquidity_usd: 5000
+    # Probability sweet spot range (matches global risk filters)
+    prob_range_low: 0.15
+    prob_range_high: 0.85
     # Kelly criterion fraction (fraction of full Kelly to use)
     kelly_fraction: 0.25
 
