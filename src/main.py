@@ -1,10 +1,13 @@
 """Trading bot CLI — entry point for all operations.
 
 Usage:
-    python -m src.main scan          # Scan markets for signals
+    python -m src.main scan          # Scan markets for trade signals
     python -m src.main backtest      # Run backtest on historical data
     python -m src.main paper         # Start/resume paper trading
     python -m src.main collect       # Collect market snapshots for backtesting
+    python -m src.main resolve       # Fetch resolved markets for edge analysis
+    python -m src.main calibrate     # Calibration analysis on resolved data
+    python -m src.main edge          # Monte Carlo edge analysis across strategies
     python -m src.main status        # Show current system status
     python -m src.main report        # Performance report with news impact analysis
 """
@@ -13,6 +16,8 @@ import argparse
 import json
 import logging
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 from .config import load_config
 from .utils.logger import setup_logger
@@ -27,7 +32,21 @@ from .engine.backtest import BacktestEngine
 from .engine.paper import PaperEngine
 from .engine.live import LiveEngine
 from .engine.report import generate_report
+from .engine.collector import (
+    collect_resolved_markets,
+    save_resolved_markets,
+    load_resolved_markets,
+    calibration_analysis,
+    format_calibration_report,
+)
+from .engine.edge_analyzer import (
+    compare_all_strategies,
+    analyze_trade_characteristics,
+    format_edge_report,
+)
 from .risk.manager import RiskManager
+
+DATA_DIR = Path(__file__).parent.parent / "data"
 
 
 def _get_news_context(config: dict, snapshots: list[dict]) -> dict[str, dict]:
@@ -346,6 +365,104 @@ def cmd_status(config: dict):
 from .data.news_feed import RSS_FEEDS
 
 
+def cmd_resolve(config: dict):
+    """Fetch resolved markets from Polymarket for edge analysis."""
+    client = PolymarketClient(config)
+
+    print("\nFetching resolved markets from Polymarket...\n")
+    resolved = collect_resolved_markets(client, max_pages=10)
+
+    if not resolved:
+        print("No resolved markets found. Check API connectivity.")
+        return
+
+    new_count, total = save_resolved_markets(resolved)
+    print(f"\nCollected {len(resolved)} resolved markets from API.")
+    print(f"  New: {new_count}  |  Total on disk: {total}")
+    print("Data saved to data/resolved_markets.json")
+
+    # Quick summary
+    yes_count = sum(1 for m in resolved if m.get("resolved_yes"))
+    no_count = len(resolved) - yes_count
+    print(f"\n  YES wins: {yes_count}  |  NO wins: {no_count}")
+
+    print("\nRun 'calibrate' to analyze this data for edge opportunities.")
+
+
+def cmd_calibrate(config: dict):
+    """Run calibration analysis on resolved market data."""
+    resolved = load_resolved_markets()
+
+    if not resolved:
+        print("No resolved market data found.")
+        print("Run 'resolve' first to collect data: python -m src.main resolve")
+        return
+
+    print(f"\nAnalyzing {len(resolved)} resolved markets...\n")
+
+    analysis = calibration_analysis(resolved)
+    print(format_calibration_report(analysis))
+
+    # Also run backtest against resolved data to test strategy accuracy
+    strategy_name = config.get("strategy", {}).get("active", "value_betting")
+    if strategy_name in STRATEGIES:
+        strategy = STRATEGIES[strategy_name](config)
+        engine = BacktestEngine(config)
+
+        print(f"Running {strategy_name} against resolved markets (ground truth)...\n")
+        result = engine.run(
+            strategy=strategy,
+            snapshots=resolved,
+            indicators_fn=lambda snap: MarketIndicators.compute_all(snap),
+            seed=42,
+        )
+        print(result.summary())
+        engine.save_results(result, f"calibration_{strategy_name}.json")
+
+
+def cmd_edge(config: dict):
+    """Run Monte Carlo edge analysis across all strategies."""
+    feed = DataFeed(PolymarketClient(config))
+
+    # Load snapshot data
+    snapshots = feed.load_snapshots()
+    if not snapshots:
+        print("No snapshot data found. Run 'collect' first.")
+        return
+
+    n_sims = 100
+    print(f"\nRunning Monte Carlo edge analysis ({n_sims} simulations per strategy)...")
+    print(f"Using {len(snapshots)} market snapshots\n")
+
+    # Compare all strategies
+    mc_results = compare_all_strategies(config, snapshots, n_sims)
+
+    # Get detailed characteristics for the best strategy
+    characteristics = None
+    if mc_results:
+        best_name = mc_results[0]["strategy"]
+        print(f"Analyzing trade characteristics for {best_name}...\n")
+        characteristics = analyze_trade_characteristics(config, snapshots, best_name)
+
+    # Format and display report
+    report = format_edge_report(mc_results, characteristics)
+    print(report)
+
+    # Save results
+    output = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "snapshots_used": len(snapshots),
+        "simulations_per_strategy": n_sims,
+        "monte_carlo_results": mc_results,
+        "characteristics": characteristics,
+    }
+    output_path = DATA_DIR / "edge_analysis.json"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(output, f, indent=2, default=str)
+    print(f"Full results saved to {output_path}")
+
+
 def cmd_report(config: dict):
     """Show performance report with news intelligence impact analysis."""
     print(generate_report(config))
@@ -357,18 +474,21 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Commands:
-  scan      Scan markets for trade signals
-  backtest  Run backtest on historical data
-  paper     Start/resume paper trading
-  collect   Collect market snapshots
-  status    Show system status
-  report    Performance report with news impact analysis
+  scan       Scan markets for trade signals
+  backtest   Run backtest on historical data
+  paper      Start/resume paper trading
+  collect    Collect market snapshots
+  resolve    Fetch resolved markets for edge analysis
+  calibrate  Calibration analysis on resolved data
+  edge       Monte Carlo edge analysis across strategies
+  status     Show system status
+  report     Performance report with news impact analysis
         """,
     )
 
     parser.add_argument(
         "command",
-        choices=["scan", "backtest", "paper", "collect", "status", "report"],
+        choices=["scan", "backtest", "paper", "collect", "resolve", "calibrate", "edge", "status", "report"],
         help="Command to run",
     )
     parser.add_argument(
@@ -410,6 +530,9 @@ Commands:
         "backtest": cmd_backtest,
         "paper": cmd_paper,
         "collect": cmd_collect,
+        "resolve": cmd_resolve,
+        "calibrate": cmd_calibrate,
+        "edge": cmd_edge,
         "status": cmd_status,
         "report": cmd_report,
     }

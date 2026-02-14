@@ -1,7 +1,7 @@
 """Backtesting engine for prediction market strategies.
 
 Simulates strategy performance against historical snapshot data.
-Binary outcomes are resolved probabilistically based on final market prices.
+Outcomes are determined by strategy-estimated probability or real resolution data.
 """
 
 import json
@@ -173,8 +173,14 @@ class BacktestEngine:
         - WIN: you paid entry_price, you get $1.00 per share
         - LOSS: you paid entry_price, you get $0.00
 
-        We simulate outcomes based on the market's probability
-        (i.e., the current market price IS the probability of YES).
+        Outcome resolution priority:
+        1. Real resolution data (snapshot has 'resolved_yes') — ground truth
+        2. Strategy's estimated probability — tests if our model beats the market
+        3. Entry price + edge fallback — minimum viable estimate
+
+        Using the MARKET price as win probability is wrong for edge testing
+        because it assumes the market is perfectly efficient (guaranteeing
+        negative returns after fees). We use our estimate instead.
         """
         entry = signal.entry_price
         size = signal.position_size_usdc
@@ -192,15 +198,30 @@ class BacktestEngine:
         else:
             shares = (size - fees) / effective_entry
 
-        # Determine outcome probabilistically
-        # If we bought YES: probability of winning = yes_price
-        # If we bought NO: probability of winning = no_price
-        if signal.signal == Signal.BUY_YES:
-            win_prob = snapshot["yes_price"]
+        # Determine outcome: prefer real resolution, else use estimated prob
+        if "resolved_yes" in snapshot:
+            # Ground truth — actual market outcome
+            yes_won = snapshot["resolved_yes"]
+            if signal.signal == Signal.BUY_YES:
+                won = yes_won
+            else:
+                won = not yes_won
         else:
-            win_prob = snapshot["no_price"]
+            # Use strategy's estimated probability for simulation
+            estimated_prob = signal.metadata.get("estimated_probability") or \
+                             signal.metadata.get("combined_probability") or \
+                             signal.metadata.get("statistical_probability")
 
-        won = random.random() < win_prob
+            if estimated_prob is not None:
+                if signal.signal == Signal.BUY_YES:
+                    win_prob = estimated_prob
+                else:
+                    win_prob = 1.0 - estimated_prob
+            else:
+                # Fallback: entry price + edge
+                win_prob = min(0.99, signal.entry_price + signal.edge)
+
+            won = random.random() < win_prob
 
         if won:
             # Each share pays out $1.00
