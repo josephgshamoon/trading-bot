@@ -1,0 +1,22 @@
+{
+  "strategy_name": "MomentumStrategy",
+  "total_trades": 0,
+  "wins": 0,
+  "losses": 0,
+  "total_pnl": 0.0,
+  "total_fees": 0.0,
+  "net_pnl": 0.0,
+  "win_rate": 0.0,
+  "avg_win": 0.0,
+  "avg_loss": 0.0,
+  "profit_factor": 0.0,
+  "max_drawdown": 0.0,
+  "sharpe_ratio": 0.0,
+  "starting_balance": 1000.0,
+  "ending_balance": 1000.0,
+  "roi_pct": 0.0,
+  "trades": [],
+  "equity_curve": [
+    1000.0
+  ]
+}

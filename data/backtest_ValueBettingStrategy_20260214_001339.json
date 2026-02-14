@@ -1,0 +1,37 @@
+{
+  "strategy_name": "ValueBettingStrategy",
+  "total_trades": 1,
+  "wins": 0,
+  "losses": 1,
+  "total_pnl": -6.8,
+  "total_fees": 0.136,
+  "net_pnl": -6.8,
+  "win_rate": 0.0,
+  "avg_win": 0,
+  "avg_loss": -6.8,
+  "profit_factor": 0.0,
+  "max_drawdown": 6.7999999999999545,
+  "sharpe_ratio": 0,
+  "starting_balance": 1000.0,
+  "ending_balance": 993.2,
+  "roi_pct": -0.6799999999999999,
+  "trades": [
+    {
+      "market_id": "bb653035-7f2e-49db-aa6e-2466c9d0744f",
+      "question": "Will the SEC approve a Solana spot ETF in 2026?",
+      "signal": "BUY_NO",
+      "entry_price": 0.630139,
+      "position_usdc": 6.8,
+      "outcome": "loss",
+      "pnl": -6.8,
+      "fees": 0.136,
+      "edge": 0.0541,
+      "strategy": "value_betting",
+      "timestamp": "2026-01-17T06:00:00+00:00"
+    }
+  ],
+  "equity_curve": [
+    1000.0,
+    993.2
+  ]
+}
