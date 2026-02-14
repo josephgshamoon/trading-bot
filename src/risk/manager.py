@@ -33,10 +33,21 @@ class Portfolio:
     trade_history: list = field(default_factory=list)
 
     @property
+    def total_value(self) -> float:
+        """Total portfolio value = cash + invested capital in open positions."""
+        invested = sum(p.get("size_usdc", 0) for p in self.open_positions)
+        return self.balance + invested
+
+    @property
     def drawdown(self) -> float:
+        """Drawdown based on total portfolio value, not just cash.
+
+        Invested capital in open positions is not a loss — only realized
+        losses and actual value decline count toward drawdown.
+        """
         if self.peak_balance <= 0:
             return 0.0
-        return (self.peak_balance - self.balance) / self.peak_balance * 100
+        return (self.peak_balance - self.total_value) / self.peak_balance * 100
 
     @property
     def open_position_count(self) -> int:
@@ -185,9 +196,9 @@ class RiskManager:
         self.daily.daily_pnl += pnl
         self.portfolio.balance += pnl
 
-        # Update peak balance
+        # Update peak balance based on total portfolio value
         self.portfolio.peak_balance = max(
-            self.portfolio.peak_balance, self.portfolio.balance
+            self.portfolio.peak_balance, self.portfolio.total_value
         )
 
         # Track consecutive losses
@@ -234,6 +245,7 @@ class RiskManager:
             "reason": reason,
             "kill_switch": self._kill_switch,
             "balance": self.portfolio.balance,
+            "total_value": self.portfolio.total_value,
             "peak_balance": self.portfolio.peak_balance,
             "drawdown_pct": round(self.portfolio.drawdown, 2),
             "daily_pnl": round(self.daily.daily_pnl, 2),
