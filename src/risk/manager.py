@@ -159,7 +159,7 @@ class RiskManager:
             return False, f"Insufficient balance for ${signal.position_size_usdc} trade"
 
         # Don't double-up on the same market (unless scaling is allowed)
-        is_crypto = getattr(signal, "metadata", {}).get("strategy") == "crypto_momentum_15m"
+        is_crypto = getattr(signal, "metadata", {}).get("strategy") in ("crypto_momentum_15m", "crypto_momentum_1h")
         if not is_crypto:
             for pos in self.portfolio.open_positions:
                 if pos.get("market_id") == signal.market_id:

@@ -655,12 +655,12 @@ def cmd_fast(config: dict):
     if engine.session and engine.session.positions:
         now_ts = time.time()
 
-        # Pass 1: Resolve 15-min crypto positions by time
+        # Pass 1: Resolve crypto positions by time (15-min and 1-hour)
         for pos in list(engine.session.positions):
             if pos.get("status") != "open":
                 continue
             meta = pos.get("metadata", {})
-            if meta.get("strategy") == "crypto_momentum_15m":
+            if meta.get("strategy") in ("crypto_momentum_15m", "crypto_momentum_1h"):
                 if _resolve_crypto_position(pos, engine, journal):
                     resolved_count += 1
 
@@ -745,7 +745,7 @@ def cmd_fast(config: dict):
         open_crypto = len([
             p for p in (engine.session.positions if engine.session else [])
             if p.get("status") == "open"
-            and p.get("metadata", {}).get("strategy") == "crypto_momentum_15m"
+            and p.get("metadata", {}).get("strategy") in ("crypto_momentum_15m", "crypto_momentum_1h")
         ])
         max_new = max(0, max_crypto - open_crypto)
 
@@ -769,8 +769,8 @@ def cmd_fast(config: dict):
                 continue
 
             # Skip if we already have a position in this market
-            # EXCEPTION: crypto_momentum_15m allows scaling (adding to same slot)
-            is_crypto = sig.metadata.get("strategy") == "crypto_momentum_15m"
+            # EXCEPTION: crypto momentum allows scaling (adding to same slot)
+            is_crypto = sig.metadata.get("strategy") in ("crypto_momentum_15m", "crypto_momentum_1h")
             existing_markets = set()
             if engine.session:
                 for p in engine.session.positions:
@@ -856,20 +856,35 @@ def _resolve_crypto_position(pos: dict, engine, journal) -> bool:
         return False
 
     now_ts = time.time()
-    # Slot hasn't ended yet (900s = 15 minutes)
-    if slot_start + 900 > now_ts:
+    # Determine slot duration: 1-hour (3600s) or 15-min (900s)
+    slot_duration = meta.get("slot_duration", 900)
+    strategy_name = meta.get("strategy", "crypto_momentum_15m")
+
+    # Slot hasn't ended yet
+    if slot_start + slot_duration > now_ts:
         return False
 
     coin = meta.get("coin", "btc")
 
-    from .data.event_markets import discover_updown_slots
-    try:
-        slots = discover_updown_slots(
-            coins=[coin], look_ahead_slots=0, look_back_slots=4,
-        )
-    except Exception as e:
-        logger.error(f"Failed to re-fetch slots for {coin}: {e}")
-        return False
+    # Re-fetch the slot to check resolution
+    if strategy_name == "crypto_momentum_1h":
+        from .data.event_markets import discover_hourly_slots
+        try:
+            slots = discover_hourly_slots(
+                coins=[coin], look_ahead_hours=0, look_back_hours=4,
+            )
+        except Exception as e:
+            logger.error(f"Failed to re-fetch 1h slots for {coin}: {e}")
+            return False
+    else:
+        from .data.event_markets import discover_updown_slots
+        try:
+            slots = discover_updown_slots(
+                coins=[coin], look_ahead_slots=0, look_back_slots=4,
+            )
+        except Exception as e:
+            logger.error(f"Failed to re-fetch slots for {coin}: {e}")
+            return False
 
     # Find the matching slot by start timestamp
     target_slot = None
@@ -882,10 +897,17 @@ def _resolve_crypto_position(pos: dict, engine, journal) -> bool:
         logger.warning(f"Slot {coin} {slot_start} not found in recent slots")
         return False
 
+    # For 1-hour slots: check if the event is marked as closed
+    # (Polymarket auto-resolves 1h markets via Binance candle)
+    if strategy_name == "crypto_momentum_1h" and hasattr(target_slot, 'closed'):
+        if not target_slot.closed:
+            # Not yet resolved by Polymarket — check price thresholds as fallback
+            pass
+
     # Determine outcome from final price
-    # Tighter thresholds after 5+ min past slot end for faster resolution
+    # Tighter thresholds after elapsed time past slot end
     up_price = target_slot.up_price
-    elapsed_since_end = now_ts - (slot_start + 900)
+    elapsed_since_end = now_ts - (slot_start + slot_duration)
     if elapsed_since_end > 300:
         # 5+ min past end: loosen to 0.60/0.40 — outcome is clear by now
         threshold_hi, threshold_lo = 0.60, 0.40
@@ -955,7 +977,7 @@ def _resolve_crypto_position(pos: dict, engine, journal) -> bool:
         trade_id=pos.get("trade_id", ""),
         market_id=pos.get("market_id", ""),
         question=pos.get("question", ""),
-        strategy="crypto_momentum_15m",
+        strategy=strategy_name,
         signal=pos.get("signal", ""),
         entry_price=entry_price,
         predicted_prob=predicted_prob,
@@ -1142,10 +1164,16 @@ def _check_profit_taking(engine, config: dict, journal):
         profit_captured = potential_pnl / max_profit if max_profit > 0 else 0
 
         # Profit-taking conditions vary by strategy:
-        if strategy == "crypto_momentum_15m":
-            # CRYPTO: cash out at 80%+ ROI — lock in profit, move to next slot
+        # No stop-loss for binary hourly candles — mid-candle dips are noise,
+        # the position resolves to $1 or $0 at candle close regardless.
+        is_stop_loss = False
+        if strategy in ("crypto_momentum_15m", "crypto_momentum_1h"):
+            # CRYPTO: cash out at 80%+ ROI — lock in profit
             # e.g., bought at $0.50, bid now at $0.90 → 80% return → sell
-            should_sell = roi >= 0.80 and potential_pnl > 0.10
+            if roi >= 0.80 and potential_pnl > 0.10:
+                should_sell = True
+            else:
+                should_sell = False
         else:
             # NON-CRYPTO: sell if >80% of max profit captured or >15% ROI
             should_sell = (roi > 0.15 and potential_pnl > 0.50) or (profit_captured > 0.80 and potential_pnl > 0.50)
@@ -1155,24 +1183,34 @@ def _check_profit_taking(engine, config: dict, journal):
             direction = meta.get("direction", "?")
             momentum = meta.get("momentum_score", 0)
             coin = meta.get("coin", "?")
-            analysis = (
-                f"Early exit at {roi:.0f}% ROI | Entry ${entry_price:.3f} -> Bid ${current_bid:.3f}\n"
-                f"Momentum was {momentum:+.2f} ({direction.upper()}) — signal correct, taking profit"
-            )
+            if is_stop_loss:
+                exit_type = "stop_loss"
+                analysis = (
+                    f"STOP-LOSS at {roi:.0%} ROI | Entry ${entry_price:.3f} -> Bid ${current_bid:.3f}\n"
+                    f"Momentum was {momentum:+.2f} ({direction.upper()}) — cutting loss to limit damage"
+                )
+            else:
+                exit_type = "profit_taking"
+                analysis = (
+                    f"Early exit at {roi:.0%} ROI | Entry ${entry_price:.3f} -> Bid ${current_bid:.3f}\n"
+                    f"Momentum was {momentum:+.2f} ({direction.upper()}) — signal correct, taking profit"
+                )
 
             logger.info(
-                f"Profit-taking: {pos.get('trade_id')} | "
+                f"{exit_type}: {pos.get('trade_id')} | "
                 f"ROI={roi:.1%} | {analysis}"
             )
             result = engine.sell_position(pos, current_bid)
             if result.get("status") == "sold":
                 actual_pnl = result.get("pnl", 0)
                 actual_roi = (actual_pnl / cost * 100) if cost > 0 else 0
+                label = "STOP-LOSS" if is_stop_loss else "PROFIT TAKEN"
                 print(
-                    f"  >> PROFIT TAKEN: {pos.get('trade_id')} | "
+                    f"  >> {label}: {pos.get('trade_id')} | "
                     f"${actual_pnl:+.2f} ({actual_roi:.0f}% ROI)"
                 )
                 if journal:
+                    outcome = "sold_loss" if is_stop_loss else "sold_profit"
                     journal.log_resolution(
                         trade_id=pos.get("trade_id", ""),
                         market_id=pos.get("market_id", ""),
@@ -1182,10 +1220,21 @@ def _check_profit_taking(engine, config: dict, journal):
                         entry_price=entry_price,
                         predicted_prob=meta.get("model_prob", entry_price),
                         predicted_edge=pos.get("edge", 0),
-                        outcome="sold_profit",
+                        outcome=outcome,
                         pnl=actual_pnl,
                         size_usdc=cost,
-                        metadata={**meta, "exit_type": "profit_taking", "roi": actual_roi, "analysis": analysis},
+                        metadata={**meta, "exit_type": exit_type, "roi": actual_roi, "analysis": analysis},
+                    )
+                # Telegram notification for stop-loss/profit-taking
+                from .notifications.telegram import TelegramNotifier
+                notifier = TelegramNotifier()
+                if notifier.is_configured():
+                    emoji = "\U0001f6d1" if is_stop_loss else "\U0001f4b0"
+                    label_tg = "STOP-LOSS" if is_stop_loss else "PROFIT"
+                    notifier.send_message(
+                        f"{emoji} <b>{label_tg} ${actual_pnl:+.2f}</b> "
+                        f"{coin.upper() if coin != '?' else ''} {direction.upper()}\n"
+                        f"ROI: {actual_roi:+.0f}% | Entry ${entry_price:.3f} -> ${current_bid:.3f}"
                     )
             else:
                 logger.warning(f"Profit-taking sell failed: {result.get('error')}")

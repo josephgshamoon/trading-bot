@@ -8,11 +8,17 @@ They use slug-based discovery with predictable naming patterns:
     eth-updown-15m-{unix_ts}
     sol-updown-15m-{unix_ts}
 
+  1-hour crypto up/down:
+    bitcoin-up-or-down-{month}-{day}-{hour}{am/pm}-et
+    solana-up-or-down-{month}-{day}-{hour}{am/pm}-et
+    ethereum-up-or-down-{month}-{day}-{hour}{am/pm}-et
+
   Elon Musk tweet brackets:
     elon-musk-of-tweets-{month}-{day}-{month}-{day}
 
 Resolution:
   - Crypto 15-min: Chainlink ETH/USD or BTC/USD data stream
+  - Crypto 1-hour: Binance candle close >= open
   - Elon tweets: xtracker.polymarket.com post counter
 """
 
@@ -33,12 +39,26 @@ XTRACKER_URL = "https://xtracker.polymarket.com"
 # 15-min slot duration in seconds
 SLOT_SECONDS = 900
 
+# 1-hour slot duration in seconds
+HOURLY_SLOT_SECONDS = 3600
+
 # Coins supported for 15-min up/down markets
 UPDOWN_COINS = {
     "btc": "btc-updown-15m",
     "eth": "eth-updown-15m",
     "sol": "sol-updown-15m",
 }
+
+# Coins supported for 1-hour up/down markets
+# Slug pattern: {name}-up-or-down-{month}-{day}-{hour}{am/pm}-et
+HOURLY_COINS = {
+    "btc": "bitcoin",
+    "eth": "ethereum",
+    "sol": "solana",
+}
+
+# ET (Eastern Time) offset from UTC
+ET_OFFSET_HOURS = -5
 
 
 def _get_json(url: str, timeout: int = 12) -> list | dict:
@@ -198,6 +218,197 @@ def get_recent_momentum(coin: str = "btc", n_slots: int = 4) -> list[UpDownSlot]
         coins=[coin], look_ahead_slots=0, look_back_slots=n_slots + 2
     )
     closed = [s for s in slots if not s.is_active and not s.is_upcoming]
+    closed.sort(key=lambda s: s.start_ts, reverse=True)
+    return closed[:n_slots]
+
+
+# ── 1-Hour Crypto Up / Down ────────────────────────────────────────
+
+
+def _utc_hour_to_et_slug(utc_dt: datetime) -> str:
+    """Convert a UTC datetime to the ET hour slug component (e.g., '2pm')."""
+    et_dt = utc_dt + timedelta(hours=ET_OFFSET_HOURS)
+    hour = et_dt.hour
+    if hour == 0:
+        return "12am"
+    elif hour < 12:
+        return f"{hour}am"
+    elif hour == 12:
+        return "12pm"
+    else:
+        return f"{hour - 12}pm"
+
+
+def _et_hour_to_utc_ts(year: int, month: int, day: int, hour_et: int) -> int:
+    """Convert ET date+hour to UTC unix timestamp for the slot start."""
+    # ET is UTC-5 (ignoring DST for simplicity — Polymarket uses fixed ET)
+    utc_hour = hour_et - ET_OFFSET_HOURS
+    # Handle day rollover
+    utc_day = day
+    utc_month = month
+    if utc_hour >= 24:
+        utc_hour -= 24
+        utc_day += 1
+    elif utc_hour < 0:
+        utc_hour += 24
+        utc_day -= 1
+    try:
+        dt = datetime(year, utc_month, utc_day, utc_hour, 0, 0, tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except ValueError:
+        return 0
+
+
+class HourlyUpDownSlot:
+    """A single 1-hour crypto up/down market window."""
+
+    def __init__(self, coin: str, start_ts: int, slug: str,
+                 event_data: dict, market_data: dict):
+        self.coin = coin
+        self.start_ts = start_ts
+        self.end_ts = start_ts + HOURLY_SLOT_SECONDS
+        self.duration = HOURLY_SLOT_SECONDS
+        self.slug = slug
+        self.event = event_data
+        self.market = market_data
+
+        # Parse prices
+        prices = market_data.get("outcomePrices", "[]")
+        if isinstance(prices, str):
+            try:
+                prices = json.loads(prices)
+            except (json.JSONDecodeError, ValueError):
+                prices = []
+        self.up_price = float(prices[0]) if prices else 0.5
+        self.down_price = float(prices[1]) if len(prices) > 1 else 0.5
+
+        self.liquidity = float(market_data.get("liquidity", 0) or 0)
+        self.volume = float(market_data.get("volume", 0) or 0)
+        self.closed = event_data.get("closed", False)
+
+        # Token IDs for order placement
+        clob_ids = market_data.get("clobTokenIds", "[]")
+        if isinstance(clob_ids, str):
+            try:
+                clob_ids = json.loads(clob_ids)
+            except (json.JSONDecodeError, ValueError):
+                clob_ids = []
+        self.up_token_id = clob_ids[0] if clob_ids else ""
+        self.down_token_id = clob_ids[1] if len(clob_ids) > 1 else ""
+
+        self.condition_id = market_data.get("conditionId", "")
+        self.market_id = market_data.get("id", "")
+        self.neg_risk = event_data.get("negRisk", False)
+
+    @property
+    def start_dt(self) -> datetime:
+        return datetime.fromtimestamp(self.start_ts, tz=timezone.utc)
+
+    @property
+    def end_dt(self) -> datetime:
+        return datetime.fromtimestamp(self.end_ts, tz=timezone.utc)
+
+    @property
+    def is_active(self) -> bool:
+        now = time.time()
+        return self.start_ts <= now < self.end_ts and not self.closed
+
+    @property
+    def is_upcoming(self) -> bool:
+        return time.time() < self.start_ts and not self.closed
+
+    @property
+    def minutes_until_start(self) -> float:
+        return max(0, (self.start_ts - time.time()) / 60)
+
+    @property
+    def question(self) -> str:
+        return self.market.get("question", f"{self.coin.upper()} Up or Down (1h)")
+
+    def __repr__(self):
+        return (
+            f"HourlySlot({self.coin.upper()} {self.start_dt.strftime('%H:%M')}-"
+            f"{self.end_dt.strftime('%H:%M')} UTC, up={self.up_price:.3f}, "
+            f"liq=${self.liquidity:,.0f}, vol=${self.volume:,.0f})"
+        )
+
+
+def discover_hourly_slots(
+    coins: list[str] | None = None,
+    look_ahead_hours: int = 3,
+    look_back_hours: int = 2,
+) -> list[HourlyUpDownSlot]:
+    """Discover current and upcoming 1-hour crypto up/down markets.
+
+    Slug pattern: {coin_name}-up-or-down-{month}-{day}-{hour}{am/pm}-et
+    Example: solana-up-or-down-february-14-2pm-et
+
+    Returns a list of HourlyUpDownSlot objects, sorted by start time.
+    """
+    if coins is None:
+        coins = list(HOURLY_COINS.keys())
+
+    now = datetime.now(timezone.utc)
+    slots = []
+
+    for coin in coins:
+        coin_name = HOURLY_COINS.get(coin)
+        if not coin_name:
+            continue
+
+        for offset in range(-look_back_hours, look_ahead_hours + 1):
+            # Calculate the target hour in ET
+            target_utc = now + timedelta(hours=offset)
+            # Align to hour boundary
+            target_utc = target_utc.replace(minute=0, second=0, microsecond=0)
+            target_et = target_utc + timedelta(hours=ET_OFFSET_HOURS)
+
+            month_str = target_et.strftime("%B").lower()
+            day = target_et.day
+            hour_str = _utc_hour_to_et_slug(target_utc)
+
+            slug = f"{coin_name}-up-or-down-{month_str}-{day}-{hour_str}-et"
+            url = f"{GAMMA_API}/events?slug={slug}"
+
+            try:
+                data = _get_json(url)
+                if not data:
+                    continue
+                ev = data[0]
+                mkts = ev.get("markets", [])
+                if not mkts:
+                    continue
+
+                start_ts = int(target_utc.timestamp())
+                slot = HourlyUpDownSlot(coin, start_ts, slug, ev, mkts[0])
+                slots.append(slot)
+            except (HTTPError, URLError, IndexError, KeyError):
+                continue
+            except Exception as e:
+                logger.debug(f"Error fetching hourly {slug}: {e}")
+                continue
+
+    slots.sort(key=lambda s: (s.start_ts, s.coin))
+    return slots
+
+
+def get_active_hourly_slot(coin: str = "sol") -> Optional[HourlyUpDownSlot]:
+    """Get the currently active 1-hour slot for a coin."""
+    slots = discover_hourly_slots(coins=[coin], look_ahead_hours=0, look_back_hours=1)
+    for s in slots:
+        if s.is_active:
+            return s
+    return None
+
+
+def get_recent_hourly_momentum(
+    coin: str = "sol", n_slots: int = 4
+) -> list[HourlyUpDownSlot]:
+    """Fetch recent resolved 1-hour slots to gauge momentum."""
+    slots = discover_hourly_slots(
+        coins=[coin], look_ahead_hours=0, look_back_hours=n_slots + 2
+    )
+    closed = [s for s in slots if s.closed or (not s.is_active and not s.is_upcoming)]
     closed.sort(key=lambda s: s.start_ts, reverse=True)
     return closed[:n_slots]
 

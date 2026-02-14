@@ -12,9 +12,11 @@ from datetime import datetime, timezone
 
 from ..data.event_markets import (
     UpDownSlot,
+    HourlyUpDownSlot,
     TweetEvent,
     TweetBracket,
     discover_updown_slots,
+    discover_hourly_slots,
     discover_tweet_events,
 )
 from ..data.crypto_prices import CryptoPriceClient as CryptoPrices
@@ -28,36 +30,41 @@ logger = logging.getLogger("trading_bot.strategy.short_term")
 
 
 class CryptoMomentumStrategy:
-    """Trade 15-min crypto up/down markets using short-term momentum.
+    """Trade 1-hour crypto up/down markets using Binance technical analysis.
 
-    The idea: if crypto has been trending in one direction over the
-    recent windows, bet on continuation. The default 50/50 pricing
-    of upcoming windows gives us edge when momentum is strong.
+    Uses Binance real-time data (RSI, VWAP, support/resistance, volume,
+    multi-timeframe trends) to predict the direction of 1-hour candles.
+
+    Advantages of 1-hour over 15-min:
+    - TA indicators are more reliable on longer timeframes
+    - Less noise/whipsaw from random price wicks
+    - Higher liquidity ($5K-$11K vs $1K-$3K)
+    - Trends have time to develop
 
     Only trades when:
-    - Recent windows show clear directional trend (2+ consecutive)
-    - Upcoming window is still near 50/50 (market hasn't priced in)
+    - Binance TA shows clear directional signal (momentum > 0.10)
+    - Slot is in its first 10 minutes (good pricing, candle just started)
     - Liquidity is sufficient (>$3K)
     """
 
-    MIN_LIQUIDITY = 1000  # SOL slots often have lower liquidity
-    MIN_EDGE = 0.001  # Near-zero — always trade, let Binance TA pick direction
+    MIN_LIQUIDITY = 3000
+    MIN_EDGE = 0.001
 
     def __init__(self, config: dict):
         self.config = config
         self.crypto_prices = CryptoPrices()
         self.binance = BinanceClient()
-        self._last_ta: dict | None = None  # Last technical analysis for logging
+        self._last_ta: dict | None = None
         self.position_pct = config.get("short_term", {}).get(
             "position_pct", 0.05
-        )  # 5% of balance per trade
+        )
 
     def evaluate_slots(
         self, balance: float, coins: list[str] | None = None
     ) -> list[TradeSignal]:
-        """Evaluate all upcoming 15-min slots and return signals."""
+        """Evaluate 1-hour slots and return signals."""
         if coins is None:
-            coins = ["sol"]  # Focus exclusively on Solana
+            coins = ["sol"]
 
         signals = []
 
@@ -72,104 +79,90 @@ class CryptoMomentumStrategy:
         return signals
 
     def _evaluate_coin(self, coin: str, balance: float) -> TradeSignal | None:
-        """Evaluate a single coin for momentum trading."""
-        # Get upcoming and recent slots
-        slots = discover_updown_slots(
-            coins=[coin], look_ahead_slots=3, look_back_slots=4
+        """Evaluate a single coin for 1-hour momentum trading."""
+        slots = discover_hourly_slots(
+            coins=[coin], look_ahead_hours=2, look_back_hours=3
         )
 
         if not slots:
             return None
 
-        # Separate slots into categories
         now = time.time()
-        recent = [s for s in slots if s.start_ts + 900 <= now]
+        recent = [s for s in slots if s.closed or (s.start_ts + 3600 <= now)]
 
-        # Target the ACTIVE slot (just started, first few minutes)
-        # instead of upcoming slots. This way we wait for the previous
-        # 15-min candle to close before deciding direction.
+        # Target the ACTIVE 1-hour slot in its first 10 minutes
+        # (after previous candle closes, good entry pricing)
         active = [
             s for s in slots
-            if s.start_ts <= now < s.start_ts + 900  # currently running
-            and now - s.start_ts < 180  # only first 3 minutes (good pricing)
+            if s.start_ts <= now < s.start_ts + 3600
+            and not s.closed
+            and now - s.start_ts < 600  # first 10 minutes
             and s.liquidity >= self.MIN_LIQUIDITY
         ]
 
         if not active:
-            # Fallback: if no active slot in its first 3 min, check upcoming
-            # that start within 60 seconds (about to begin, candle nearly closed)
+            # Fallback: upcoming slot starting within 2 minutes
             upcoming = [
                 s for s in slots
                 if s.is_upcoming
-                and s.start_ts - now < 60  # starts within 1 min
+                and s.start_ts - now < 120
                 and s.liquidity >= self.MIN_LIQUIDITY
             ]
             if not upcoming:
-                logger.debug(f"{coin}: no tradeable slots (waiting for candle close)")
+                logger.debug(f"{coin}: no tradeable 1h slots (waiting for candle close)")
                 return None
             target = upcoming[0]
         else:
             target = active[0]
 
         logger.info(
-            f"{coin.upper()}: targeting {target.slug} "
+            f"{coin.upper()}: targeting 1h slot {target.slug} "
             f"(started {now - target.start_ts:.0f}s ago)"
         )
 
-        # Calculate momentum from recent resolved windows
+        # Calculate momentum from Binance TA + recent slot history
         momentum_score = self._calculate_momentum(coin, recent)
 
-        # Wait for a clear signal — don't trade neutral/coin-flip situations
-        if abs(momentum_score) < 0.03:
+        # Require clear directional signal
+        if abs(momentum_score) < 0.10:
             logger.info(
-                f"{coin}: signal too weak ({momentum_score:+.3f}), waiting for clearer entry"
+                f"{coin}: signal too weak ({momentum_score:+.3f}), skipping"
             )
             return None
 
         # Determine direction and edge
         if momentum_score > 0:
-            # Bullish momentum — bet UP
             direction = "up"
             our_prob = 0.5 + (abs(momentum_score) * 0.30)
             market_price = target.up_price
             token_id = target.up_token_id
         else:
-            # Bearish momentum — bet DOWN
             direction = "down"
             our_prob = 0.5 + (abs(momentum_score) * 0.30)
             market_price = target.down_price
             token_id = target.down_token_id
 
-        # Cap probability — don't get overconfident
         our_prob = min(0.70, our_prob)
 
         edge = our_prob - market_price
-        # Always trade every slot — even if edge is small or slightly negative.
-        # If the market is ahead of our estimate, we still trust Binance TA
-        # for direction, just size down.
         if edge < -0.10:
-            # Only skip if the market strongly disagrees (>10% against us)
             logger.debug(
                 f"{coin}: market strongly against us ({edge:.3f}), skipping"
             )
             return None
-        # Floor edge at a tiny positive for signal generation
         edge = max(0.005, edge)
 
-        # Position sizing — fewer trades, bigger size
-        # Strong signal (momentum > 0.3): 8% of balance
-        # Weak signal: 4% of balance
+        # Conviction-based sizing: 4-8% of balance
         conviction = min(1.0, abs(momentum_score) / 0.3)
-        size_pct = 0.04 + 0.04 * conviction  # 4-8% of balance
+        size_pct = 0.04 + 0.04 * conviction
         size_usdc = balance * size_pct
-        size_usdc = min(size_usdc, target.liquidity * 0.1)  # Max 10% of liquidity
-        size_usdc = max(5.0, size_usdc)  # Minimum $5
+        size_usdc = min(size_usdc, target.liquidity * 0.1)
+        size_usdc = max(5.0, size_usdc)
 
-        # Build signal
         signal = TradeSignal(
             market_id=target.condition_id,
             question=target.question,
-            signal=Signal.BUY_YES,  # YES = Up, or we flip for Down
+            signal=Signal.BUY_YES,
             entry_price=target.up_price if direction == "up" else (1 - target.down_price),
             confidence=min(1.0, abs(momentum_score)),
             edge=edge,
@@ -177,14 +170,15 @@ class CryptoMomentumStrategy:
             reason=(
                 f"{coin.upper()} {direction} momentum={momentum_score:+.2f}, "
                 f"P={our_prob:.3f} vs market={market_price:.3f}, "
-                f"{target.start_dt.strftime('%H:%M')}-{target.end_dt.strftime('%H:%M')} UTC"
+                f"{target.start_dt.strftime('%H:%M')}-{target.end_dt.strftime('%H:%M')} UTC (1h)"
             ),
             metadata={
-                "strategy": "crypto_momentum_15m",
+                "strategy": "crypto_momentum_1h",
                 "coin": coin,
                 "direction": direction,
                 "momentum_score": momentum_score,
                 "slot_start": target.start_ts,
+                "slot_duration": 3600,
                 "token_ids": [target.up_token_id, target.down_token_id],
                 "neg_risk": target.neg_risk,
                 "target_token_id": token_id,
@@ -193,14 +187,14 @@ class CryptoMomentumStrategy:
         )
 
         logger.info(
-            f"{coin.upper()} momentum signal: {direction} "
+            f"{coin.upper()} 1h signal: {direction} "
             f"momentum={momentum_score:+.2f} edge={edge:.3f} "
             f"size=${size_usdc:.2f}"
         )
         return signal
 
     def _calculate_momentum(
-        self, coin: str, recent_slots: list[UpDownSlot]
+        self, coin: str, recent_slots: list
     ) -> float:
         """Calculate momentum from Binance technical analysis.
 
@@ -534,7 +528,7 @@ class ShortTermStrategy:
         """
         signals = []
 
-        logger.info("Evaluating 15-min SOL momentum...")
+        logger.info("Evaluating 1h SOL momentum...")
         try:
             crypto_signals = self.crypto.evaluate_slots(balance)
             signals.extend(crypto_signals)
