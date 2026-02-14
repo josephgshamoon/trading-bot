@@ -11,7 +11,7 @@ trading:
   # Mode: backtest | paper | live
   mode: paper
   # Maximum number of open positions at once
-  max_open_positions: 5
+  max_open_positions: 50
   # Default position size in USDT
   default_position_usdc: 5.0
   # Maximum single position in USDC
@@ -25,7 +25,7 @@ risk:
   # Maximum total drawdown percentage before kill switch
   max_drawdown_pct: 20.0
   # Maximum number of trades per day
-  max_trades_per_day: 10
+  max_trades_per_day: 100
   # Circuit breaker: consecutive losses before pausing
   circuit_breaker_losses: 3
   # Cooldown period after circuit breaker (minutes)
