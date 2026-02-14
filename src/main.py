@@ -4,20 +4,30 @@ Usage:
     python -m src.main scan          # Scan markets for trade signals
     python -m src.main backtest      # Run backtest on historical data
     python -m src.main paper         # Start/resume paper trading
+    python -m src.main live          # Start/resume live trading (real USDC)
+    python -m src.main fast          # Fast-cycle short-term trading (15-min crypto, tweets)
     python -m src.main collect       # Collect market snapshots for backtesting
     python -m src.main resolve       # Fetch resolved markets for edge analysis
     python -m src.main calibrate     # Calibration analysis on resolved data
     python -m src.main edge          # Monte Carlo edge analysis across strategies
     python -m src.main status        # Show current system status
     python -m src.main report        # Performance report with news impact analysis
+    python -m src.main stats         # Trade journal accuracy & calibration report
 """
 
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from project root (two levels up from this file)
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_env_path)
 
 from .config import load_config
 from .utils.logger import setup_logger
@@ -25,6 +35,7 @@ from .exchange.polymarket_client import PolymarketClient
 from .data.feed import DataFeed
 from .data.indicators import MarketIndicators
 from .data.news_feed import NewsFeed
+from .data.categorizer import MarketCategorizer
 from .intelligence.analyzer import MarketAnalyzer
 from .strategy import STRATEGIES
 from .strategy.news_enhanced import NewsEnhancedStrategy
@@ -45,6 +56,7 @@ from .engine.edge_analyzer import (
     format_edge_report,
 )
 from .risk.manager import RiskManager
+from .data.journal import TradeJournal
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 
@@ -463,6 +475,462 @@ def cmd_edge(config: dict):
     print(f"Full results saved to {output_path}")
 
 
+def cmd_live(config: dict):
+    """Run live trading — real CLOB orders with real USDC."""
+    logger = logging.getLogger("trading_bot")
+
+    # Force live mode in config
+    config.setdefault("trading", {})["mode"] = "live"
+
+    client = PolymarketClient(config)
+    feed = DataFeed(client)
+    risk = RiskManager(config)
+
+    strategy_name = config.get("strategy", {}).get("active", "value_betting")
+    if strategy_name not in STRATEGIES:
+        logger.error(f"Unknown strategy: {strategy_name}")
+        sys.exit(1)
+
+    strategy = STRATEGIES[strategy_name](config)
+    engine = LiveEngine(config, risk)
+
+    if not engine.is_enabled:
+        print("\nLive trading is NOT enabled. Requirements:")
+        print("  1. Set POLYMARKET_LIVE_ENABLED=true in .env")
+        print("  2. Have valid API credentials (run scripts/setup_api_creds.py)")
+        print("  3. If geo-blocked, set POLYMARKET_PROXY_URL in .env")
+        print(f"\n  Status: {engine.get_status()}")
+        return
+
+    # Show proxy status for live trading
+    from .exchange.proxy import get_proxy_status
+    proxy_info = get_proxy_status()
+    if proxy_info["configured"]:
+        print(f"\n  Proxy: {proxy_info['proxy_url']} ({proxy_info['scheme']})")
+    else:
+        print(f"\n  Proxy: none (set POLYMARKET_PROXY_URL if getting 403 geo-blocks)")
+
+    # Fetch live balance
+    live_balance = engine.get_balance()
+    print(f"  CLOB USDC Balance: ${live_balance:.2f}")
+
+    if live_balance < 1.0:
+        print("  Insufficient balance for live trading.")
+        return
+
+    # Load or start session
+    if engine.load_session():
+        print(f"\n  Resumed live session: {engine.session.session_id}")
+    else:
+        engine.start_session(strategy_name, live_balance)
+        print(f"\n  Started new live session with ${live_balance:.2f}")
+
+    # Get news context if using news_enhanced strategy
+    is_news_strategy = isinstance(strategy, NewsEnhancedStrategy)
+    news_context = {}
+
+    if is_news_strategy:
+        print(f"\nFetching news intelligence...\n")
+        snapshots = feed.get_all_snapshots(config)
+        news_context = _get_news_context(config, snapshots)
+
+    # Scan for signals
+    print(f"\nScanning markets with {strategy_name}...\n")
+    signals = engine.scan_markets(strategy, feed, news_context=news_context)
+
+    if not signals:
+        print("No trade signals found.")
+    else:
+        signals.sort(key=lambda s: s.confidence, reverse=True)
+        print(f"Found {len(signals)} signals:\n")
+        for i, sig in enumerate(signals, 1):
+            print(f"  {i}. {sig}")
+
+        # Execute top signals
+        max_new = config.get("trading", {}).get("max_open_positions", 5) - len(
+            [p for p in (engine.session.positions if engine.session else [])
+             if p.get("status") == "open"]
+        )
+
+        executed = 0
+        for sig in signals[:max_new]:
+            result = engine.execute_trade(sig)
+            if result.get("status") == "executed":
+                executed += 1
+                print(f"  >> EXECUTED: {result['trade_id']} | "
+                      f"{result['signal']} {result['shares']:.1f} shares "
+                      f"@ ${result['price']:.4f} | order={result['order_id']}")
+            elif result.get("error"):
+                print(f"  >> FAILED: {result['error']}")
+
+        print(f"\nExecuted {executed} live trades.")
+
+    # Check for resolved positions (with journal logging)
+    journal = TradeJournal()
+    resolved = engine.check_and_resolve(client, journal=journal)
+    if resolved:
+        print(f"\n{len(resolved)} positions resolved:")
+        for r in resolved:
+            print(f"  {r['trade_id']}: {r['status']} (${r['pnl']:+.2f})")
+
+    # Print summary
+    summary = engine.get_summary()
+    balance_now = engine.get_balance()
+    print(f"\n{'='*50}")
+    print(f"  LIVE SESSION: {summary['session_id']}")
+    print(f"  Strategy: {summary['strategy']}")
+    print(f"  CLOB Balance: ${balance_now:.2f}")
+    print(f"  Session PnL: ${summary['total_pnl']:+.2f}")
+    print(f"  Trades: {summary['total_trades']} (W:{summary['wins']} L:{summary['losses']})")
+    print(f"  Win Rate: {summary['win_rate']}")
+    print(f"  Open: {summary['open_positions']}")
+    print(f"{'='*50}\n")
+
+
+def cmd_fast(config: dict):
+    """Run fast-cycle short-term trading (15-min crypto, tweet brackets).
+
+    Designed to be called every minute by cron. Lightweight — no
+    news fetch, no LLM calls, just event market discovery + momentum.
+
+    Includes:
+    - Cycle logging (all signals — executed and skipped)
+    - 15-min crypto resolution checking (time-based)
+    - Tweet bracket resolution checking (Gamma API closed flag)
+    - Journal logging for every resolution
+    """
+    import time
+    logger = logging.getLogger("trading_bot")
+
+    config.setdefault("trading", {})["mode"] = "live"
+
+    risk = RiskManager(config)
+    engine = LiveEngine(config, risk)
+    journal = TradeJournal()
+
+    if not engine.is_enabled:
+        print("Live trading not enabled. Set POLYMARKET_LIVE_ENABLED=true")
+        return
+
+    from .exchange.proxy import get_proxy_status
+    proxy_info = get_proxy_status()
+    if proxy_info["configured"]:
+        print(f"  Proxy: {proxy_info['proxy_url']}")
+
+    balance = engine.get_balance()
+    print(f"  Balance: ${balance:.2f}")
+
+    if balance < 1.0:
+        print("  Insufficient balance.")
+        return
+
+    if engine.load_session():
+        print(f"  Session: {engine.session.session_id}")
+    else:
+        engine.start_session("short_term", balance)
+        print(f"  New session: ${balance:.2f}")
+
+    # ── Resolution checking ──────────────────────────────────────
+    resolved_count = 0
+
+    if engine.session and engine.session.positions:
+        now_ts = time.time()
+
+        for pos in list(engine.session.positions):
+            if pos.get("status") != "open":
+                continue
+
+            meta = pos.get("metadata", {})
+            strategy_name = meta.get("strategy", "")
+
+            # 15-min crypto: resolve by time + re-fetch slot price
+            if strategy_name == "crypto_momentum_15m":
+                resolved = _resolve_crypto_position(pos, engine, journal)
+                if resolved:
+                    resolved_count += 1
+
+            # Tweet brackets: resolve via Gamma API closed check
+            elif strategy_name == "tweet_brackets":
+                try:
+                    client = PolymarketClient(config)
+                    resolved_list = engine.check_and_resolve(client, journal=journal)
+                    resolved_count += len(resolved_list)
+                    break  # check_and_resolve handles all positions
+                except Exception as e:
+                    logger.error(f"Tweet bracket resolution error: {e}")
+
+    if resolved_count:
+        print(f"\n  {resolved_count} position(s) resolved.")
+
+    # ── Signal scanning ──────────────────────────────────────────
+    from .strategy.short_term import ShortTermStrategy
+    strategy = ShortTermStrategy(config)
+
+    print(f"\nScanning short-term markets...")
+    signals = strategy.evaluate_all(balance)
+
+    # Track all signals for journal (executed + skipped)
+    cycle_signals: list[dict] = []
+
+    if not signals:
+        print("No short-term signals.")
+    else:
+        signals.sort(key=lambda s: s.edge, reverse=True)
+        print(f"\n{len(signals)} signals found:\n")
+        for i, sig in enumerate(signals, 1):
+            strat = sig.metadata.get("strategy", "unknown")
+            print(f"  {i}. [{strat}] {sig}")
+
+        # Execute — limit to 2 trades per cycle
+        max_trades = config.get("short_term", {}).get("max_per_cycle", 2)
+        open_count = len([
+            p for p in (engine.session.positions if engine.session else [])
+            if p.get("status") == "open"
+        ])
+        max_new = max(0, max_trades - open_count)
+
+        executed = 0
+        for idx, sig in enumerate(signals):
+            sig_record = {
+                "market_id": sig.market_id,
+                "question": sig.question[:80],
+                "signal": sig.signal.value,
+                "edge": round(sig.edge, 4),
+                "confidence": round(sig.confidence, 4),
+                "strategy": sig.metadata.get("strategy", "unknown"),
+            }
+
+            # Check if we should execute
+            target_token = sig.metadata.get("target_token_id", "")
+            if not target_token:
+                sig_record["action"] = "skipped"
+                sig_record["skip_reason"] = "no target token"
+                cycle_signals.append(sig_record)
+                continue
+
+            if idx >= max_new:
+                sig_record["action"] = "skipped"
+                sig_record["skip_reason"] = "max trades per cycle"
+                cycle_signals.append(sig_record)
+                continue
+
+            result = engine.execute_trade(sig)
+            if result.get("status") == "executed":
+                executed += 1
+                sig_record["action"] = "executed"
+                sig_record["trade_id"] = result.get("trade_id", "")
+                print(
+                    f"  >> EXECUTED: {result['trade_id']} | "
+                    f"{result['signal']} @ ${result['price']:.4f} | "
+                    f"order={result.get('order_id', 'N/A')[:16]}..."
+                )
+            elif result.get("error"):
+                sig_record["action"] = "skipped"
+                sig_record["skip_reason"] = result["error"]
+                print(f"  >> FAILED: {result['error']}")
+
+            cycle_signals.append(sig_record)
+
+        print(f"\nExecuted {executed} short-term trades.")
+
+    # ── Log cycle to journal ─────────────────────────────────────
+    open_count = len([
+        p for p in (engine.session.positions if engine.session else [])
+        if p.get("status") == "open"
+    ])
+    journal.log_cycle(
+        balance=engine.get_balance(),
+        signals=cycle_signals,
+        open_positions=open_count,
+        strategy="short_term",
+    )
+
+    print(f"\n  Balance: ${engine.get_balance():.2f}")
+
+
+def _resolve_crypto_position(pos: dict, engine, journal) -> bool:
+    """Resolve a 15-min crypto up/down position if its slot has ended.
+
+    Re-fetches the slot via ``discover_updown_slots()`` to check the
+    final price.  Returns True if the position was resolved.
+    """
+    import time
+    logger = logging.getLogger("trading_bot")
+
+    meta = pos.get("metadata", {})
+    slot_start = meta.get("slot_start", 0)
+    if not slot_start:
+        return False
+
+    now_ts = time.time()
+    # Slot hasn't ended yet (900s = 15 minutes)
+    if slot_start + 900 > now_ts:
+        return False
+
+    coin = meta.get("coin", "btc")
+
+    from .data.event_markets import discover_updown_slots
+    try:
+        slots = discover_updown_slots(
+            coins=[coin], look_ahead_slots=0, look_back_slots=4,
+        )
+    except Exception as e:
+        logger.error(f"Failed to re-fetch slots for {coin}: {e}")
+        return False
+
+    # Find the matching slot by start timestamp
+    target_slot = None
+    for s in slots:
+        if s.start_ts == slot_start:
+            target_slot = s
+            break
+
+    if target_slot is None:
+        logger.warning(f"Slot {coin} {slot_start} not found in recent slots")
+        return False
+
+    # Determine outcome from final price
+    # up_price > 0.7 means UP won, up_price < 0.3 means DOWN won
+    up_price = target_slot.up_price
+    if 0.3 <= up_price <= 0.7:
+        # Not yet clearly resolved — skip
+        return False
+
+    direction = meta.get("direction", "up")
+    if direction == "up":
+        won = up_price > 0.7
+    else:
+        won = up_price < 0.3
+
+    if won:
+        pnl = pos.get("shares", 0) * 1.0 - pos.get("size_usdc", 0)
+        pos["status"] = "won"
+        if engine.session:
+            engine.session.wins += 1
+    else:
+        pnl = -pos.get("size_usdc", 0)
+        pos["status"] = "lost"
+        if engine.session:
+            engine.session.losses += 1
+
+    pos["pnl"] = round(pnl, 4)
+    pos["exit_time"] = datetime.now(timezone.utc).isoformat()
+
+    engine.risk.record_trade_exit(pos.get("market_id", ""), pnl)
+    if engine.session:
+        engine.session.total_pnl += pnl
+        engine.session.current_balance = engine.risk.portfolio.balance
+        engine.session.closed_trades.append(pos)
+        # Remove from open positions list
+        engine.session.positions = [
+            p for p in engine.session.positions
+            if p.get("trade_id") != pos.get("trade_id")
+        ]
+        engine._save_session()
+
+    # Log resolution to journal
+    entry_price = pos.get("entry_price", 0)
+    predicted_prob = meta.get("market_price", entry_price)
+    journal.log_resolution(
+        trade_id=pos.get("trade_id", ""),
+        market_id=pos.get("market_id", ""),
+        question=pos.get("question", ""),
+        strategy="crypto_momentum_15m",
+        signal=pos.get("signal", ""),
+        entry_price=entry_price,
+        predicted_prob=predicted_prob,
+        predicted_edge=pos.get("edge", 0),
+        outcome=pos["status"],
+        pnl=pnl,
+        size_usdc=pos.get("size_usdc", 0),
+        metadata=meta,
+    )
+
+    logger.info(
+        f"Crypto position resolved: {pos.get('trade_id')} "
+        f"{'WON' if won else 'LOST'} pnl=${pnl:+.2f}"
+    )
+
+    # Send Telegram notification
+    from .notifications.telegram import TelegramNotifier
+    notifier = TelegramNotifier()
+    if notifier.is_configured():
+        emoji = "\U0001f389" if won else "\U0001f4a5"
+        notifier.send_message(
+            f"{emoji} <b>Crypto Position Resolved: {'WON' if won else 'LOST'}</b>\n\n"
+            f"<b>{pos.get('question', '')}</b>\n"
+            f"P&L: <code>${pnl:+.2f}</code>\n"
+            f"ID: <code>{pos.get('trade_id', '')}</code>"
+        )
+
+    return True
+
+
+def cmd_stats(config: dict):
+    """Show trade journal accuracy and calibration report."""
+    journal = TradeJournal()
+    days = 7
+
+    stats = journal.get_accuracy_stats(days=days)
+
+    print(f"\n{'='*55}")
+    print(f"  TRADE JOURNAL — last {days} days")
+    print(f"{'='*55}")
+
+    if stats["total_trades"] == 0:
+        print("\n  No resolved trades in journal yet.")
+        print("  Trades are logged when positions resolve (15-min crypto,")
+        print("  tweet brackets, or Gamma API market closures).\n")
+        return
+
+    print(f"\n  Overall:")
+    print(f"    Trades:  {stats['total_trades']} (W:{stats['wins']} L:{stats['losses']})")
+    print(f"    Win Rate: {stats['win_rate']:.1%}")
+    print(f"    Total PnL: ${stats['total_pnl']:+.2f}")
+    print(f"    Avg Predicted Edge: {stats['avg_predicted_edge']:+.4f}")
+    print(f"    Avg Realized PnL%:  {stats['avg_realized_pnl_pct']:+.4f}")
+
+    # Per-strategy breakdown
+    if stats["by_strategy"]:
+        print(f"\n  By Strategy:")
+        for name, s in stats["by_strategy"].items():
+            print(
+                f"    {name}: {s['total_trades']} trades, "
+                f"W:{s['wins']} L:{s['losses']}, "
+                f"WR={s['win_rate']:.0%}, "
+                f"PnL=${s['total_pnl']:+.2f}"
+            )
+
+    # Calibration table
+    if stats["calibration"]:
+        print(f"\n  Calibration (predicted vs actual win rate):")
+        print(f"    {'Bin':>9s}  {'Pred':>6s}  {'Actual':>6s}  {'Count':>5s}")
+        print(f"    {'─'*9}  {'─'*6}  {'─'*6}  {'─'*5}")
+        for row in stats["calibration"]:
+            print(
+                f"    {row['bin']:>9s}  "
+                f"{row['predicted']:6.3f}  "
+                f"{row['actual']:6.3f}  "
+                f"{row['count']:5d}"
+            )
+
+    # Recent trades
+    recent = journal.get_recent_trades(n=10)
+    if recent:
+        print(f"\n  Recent Trades (last 10):")
+        for t in recent:
+            outcome = t.get("outcome", "?")
+            icon = "W" if outcome == "won" else "L"
+            pnl = t.get("pnl", 0)
+            q = t.get("question", "")[:45]
+            strat = t.get("strategy", "?")
+            print(
+                f"    [{icon}] ${pnl:+6.2f}  {strat:<22s}  {q}"
+            )
+
+    print(f"\n{'='*55}\n")
+
+
 def cmd_report(config: dict):
     """Show performance report with news intelligence impact analysis."""
     print(generate_report(config))
@@ -477,18 +945,21 @@ Commands:
   scan       Scan markets for trade signals
   backtest   Run backtest on historical data
   paper      Start/resume paper trading
+  live       Start/resume live trading (real USDC)
+  fast       Fast-cycle short-term trading (15-min crypto, tweets)
   collect    Collect market snapshots
   resolve    Fetch resolved markets for edge analysis
   calibrate  Calibration analysis on resolved data
   edge       Monte Carlo edge analysis across strategies
   status     Show system status
   report     Performance report with news impact analysis
+  stats      Trade journal accuracy & calibration report
         """,
     )
 
     parser.add_argument(
         "command",
-        choices=["scan", "backtest", "paper", "collect", "resolve", "calibrate", "edge", "status", "report"],
+        choices=["scan", "backtest", "paper", "live", "fast", "collect", "resolve", "calibrate", "edge", "status", "report", "stats"],
         help="Command to run",
     )
     parser.add_argument(
@@ -529,12 +1000,15 @@ Commands:
         "scan": cmd_scan,
         "backtest": cmd_backtest,
         "paper": cmd_paper,
+        "live": cmd_live,
+        "fast": cmd_fast,
         "collect": cmd_collect,
         "resolve": cmd_resolve,
         "calibrate": cmd_calibrate,
         "edge": cmd_edge,
         "status": cmd_status,
         "report": cmd_report,
+        "stats": cmd_stats,
     }
 
     commands[args.command](config)
