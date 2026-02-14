@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -833,6 +833,54 @@ def cmd_fast(config: dict):
         open_positions=open_count,
         strategy="short_term",
     )
+
+    # ── Hourly Telegram summary (top of each hour) ────────────
+    now = datetime.now(timezone.utc)
+    if now.minute <= 1:
+        flag_file = DATA_DIR / ".last_hourly_summary"
+        current_hour = now.strftime("%Y-%m-%d-%H")
+        last_sent = ""
+        if flag_file.exists():
+            last_sent = flag_file.read_text().strip()
+        if last_sent != current_hour:
+            from .notifications.telegram import TelegramNotifier
+            notifier = TelegramNotifier()
+            if notifier.is_configured():
+                # Last hour trades from journal
+                recent = journal.get_recent_trades(n=50)
+                one_hour_ago = (now - timedelta(hours=1)).isoformat()
+                hour_trades = [t for t in recent if t.get("ts", "") >= one_hour_ago]
+                h_wins = sum(1 for t in hour_trades if t.get("outcome") == "won")
+                h_losses = sum(1 for t in hour_trades if t.get("outcome") == "lost")
+                h_pnl = sum(t.get("pnl", 0) for t in hour_trades)
+
+                # Session PnL
+                session_pnl = engine.session.total_pnl if engine.session else 0.0
+
+                # Next slot info
+                next_info = "—"
+                try:
+                    from .data.event_markets import discover_hourly_slots
+                    upcoming = discover_hourly_slots(coins=["sol"], look_ahead_hours=2)
+                    future = [s for s in upcoming if s.start_ts > now.timestamp()]
+                    if future:
+                        ns = future[0]
+                        slot_time = datetime.fromtimestamp(ns.start_ts, tz=timezone.utc).strftime("%H:%M")
+                        next_info = f"SOL [{slot_time} UTC]"
+                except Exception:
+                    pass
+
+                msg = (
+                    "\U0001f4ca <b>Hourly Summary</b>\n"
+                    f"Balance: ${onchain_balance:.2f}\n"
+                    f"Last hour: {h_wins}W/{h_losses}L | ${h_pnl:+.2f}\n"
+                    f"Session PnL: ${session_pnl:+.2f}\n"
+                    f"Next: {next_info}"
+                )
+                notifier.send_message(msg)
+
+            flag_file.parent.mkdir(parents=True, exist_ok=True)
+            flag_file.write_text(current_hour)
 
     print(f"\n  Balance: ${onchain_balance:.2f}")
 
