@@ -166,7 +166,13 @@ class PaperEngine:
         # Record with risk manager
         self.risk.record_trade_entry(signal, trade_id)
 
-        self.session.positions.append(asdict(position))
+        pos_dict = asdict(position)
+        # Store signal metadata for performance tracking
+        pos_dict["metadata"] = signal.metadata
+        pos_dict["confidence"] = signal.confidence
+        pos_dict["edge"] = signal.edge
+        pos_dict["reason"] = signal.reason
+        self.session.positions.append(pos_dict)
         self.session.total_trades += 1
         self.session.current_balance = self.risk.portfolio.balance
 

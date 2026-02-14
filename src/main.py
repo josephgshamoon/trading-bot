@@ -6,6 +6,7 @@ Usage:
     python -m src.main paper         # Start/resume paper trading
     python -m src.main collect       # Collect market snapshots for backtesting
     python -m src.main status        # Show current system status
+    python -m src.main report        # Performance report with news impact analysis
 """
 
 import argparse
@@ -25,6 +26,7 @@ from .strategy.news_enhanced import NewsEnhancedStrategy
 from .engine.backtest import BacktestEngine
 from .engine.paper import PaperEngine
 from .engine.live import LiveEngine
+from .engine.report import generate_report
 from .risk.manager import RiskManager
 
 
@@ -344,6 +346,11 @@ def cmd_status(config: dict):
 from .data.news_feed import RSS_FEEDS
 
 
+def cmd_report(config: dict):
+    """Show performance report with news intelligence impact analysis."""
+    print(generate_report(config))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Polymarket Trading Bot",
@@ -355,12 +362,13 @@ Commands:
   paper     Start/resume paper trading
   collect   Collect market snapshots
   status    Show system status
+  report    Performance report with news impact analysis
         """,
     )
 
     parser.add_argument(
         "command",
-        choices=["scan", "backtest", "paper", "collect", "status"],
+        choices=["scan", "backtest", "paper", "collect", "status", "report"],
         help="Command to run",
     )
     parser.add_argument(
@@ -403,6 +411,7 @@ Commands:
         "paper": cmd_paper,
         "collect": cmd_collect,
         "status": cmd_status,
+        "report": cmd_report,
     }
 
     commands[args.command](config)

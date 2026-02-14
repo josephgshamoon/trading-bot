@@ -27,25 +27,27 @@ RSS_FEEDS = {
     "politics": [
         "https://feeds.bbci.co.uk/news/politics/rss.xml",
         "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
-        "https://feeds.reuters.com/Reuters/PoliticsNews",
+        "https://www.aljazeera.com/xml/rss/all.xml",
     ],
     "world": [
         "https://feeds.bbci.co.uk/news/world/rss.xml",
         "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
-        "https://feeds.reuters.com/Reuters/worldNews",
+        "https://feeds.npr.org/1004/rss.xml",
     ],
     "business": [
         "https://feeds.bbci.co.uk/news/business/rss.xml",
         "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
-        "https://feeds.reuters.com/reuters/businessNews",
+        "https://feeds.npr.org/1006/rss.xml",
     ],
     "crypto": [
         "https://cointelegraph.com/rss",
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://decrypt.co/feed",
     ],
     "sports": [
         "https://rss.nytimes.com/services/xml/rss/nyt/Sports.xml",
         "https://feeds.bbci.co.uk/sport/rss.xml",
+        "https://www.espn.com/espn/rss/news",
     ],
     "science": [
         "https://rss.nytimes.com/services/xml/rss/nyt/Science.xml",
