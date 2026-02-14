@@ -179,16 +179,30 @@ class PolymarketClient:
     def get_price_history(
         self,
         token_id: str,
-        interval: str = "1h",
         fidelity: int = 60,
+        hours_back: int = 24,
     ) -> list[dict]:
         """Fetch price history for a specific outcome token.
 
+        Uses the CLOB prices-history endpoint.
         Returns list of {t: timestamp, p: price} dicts.
         """
-        params = {"market": token_id, "interval": interval, "fidelity": fidelity}
+        now = int(time.time())
+        start = now - (hours_back * 3600)
+        params = {
+            "tokenID": token_id,
+            "startTs": start,
+            "endTs": now,
+            "fidelity": fidelity,
+        }
         try:
-            return self._get(f"{self.gamma_url}/prices", params)
+            data = self._get(f"{self.clob_url}/prices-history", params)
+            # Normalize response to [{t, p}] format
+            if isinstance(data, dict) and "history" in data:
+                return data["history"]
+            if isinstance(data, list):
+                return data
+            return []
         except Exception as e:
             logger.warning(f"Could not fetch price history for {token_id}: {e}")
             return []
