@@ -730,6 +730,13 @@ class LiveEngine:
 
         self.risk.initialize_portfolio(self.session.current_balance)
 
+        # Fix: peak_balance must reflect the session's starting balance
+        # (high-water mark), not the current depleted balance. Otherwise
+        # the drawdown circuit breaker resets every cron cycle and never
+        # triggers. The true peak is at least starting_balance.
+        self.risk.portfolio.starting_balance = self.session.starting_balance
+        self.risk.portfolio.peak_balance = self.session.starting_balance
+
         # Restore open positions to risk manager
         for pos in self.session.positions:
             if pos.get("status") == "open":
