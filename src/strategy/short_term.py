@@ -42,13 +42,15 @@ class CryptoMomentumStrategy:
     - Trends have time to develop
 
     Only trades when:
-    - Binance TA shows clear directional signal (momentum > 0.10)
+    - Binance TA shows directional signal (0.10 < momentum < 0.22)
     - Slot is in its first 10 minutes (good pricing, candle just started)
     - Liquidity is sufficient (>$3K)
+    - Not during historically bad hours (17 UTC)
     """
 
     MIN_LIQUIDITY = 3000
-    MIN_EDGE = 0.001
+    MIN_EDGE = 0.02
+    MAX_MOMENTUM = 0.22  # trades above this are chasing — 16.7% WR historically
 
     def __init__(self, config: dict):
         self.config = config
@@ -123,11 +125,26 @@ class CryptoMomentumStrategy:
         # Calculate momentum from Binance TA + recent slot history
         momentum_score = self._calculate_momentum(coin, recent)
 
-        # Require clear directional signal
+        # Require directional signal but reject high-momentum chasing.
+        # Data from 48 trades shows: 0.10-0.20 range has 51% WR (+$10.83),
+        # while 0.20+ has 18% WR (-$100.83). High momentum = move already priced in.
         if abs(momentum_score) < 0.10:
             logger.info(
                 f"{coin}: signal too weak ({momentum_score:+.3f}), skipping"
             )
+            return None
+
+        if abs(momentum_score) > self.MAX_MOMENTUM:
+            logger.info(
+                f"{coin}: momentum too high ({momentum_score:+.3f} > {self.MAX_MOMENTUM}), "
+                f"likely chasing — skipping"
+            )
+            return None
+
+        # Skip historically bad hours (17 UTC was 0/7, -$66.65)
+        current_hour = datetime.now(timezone.utc).hour
+        if current_hour in (17,):
+            logger.info(f"{coin}: hour {current_hour} UTC is historically unprofitable, skipping")
             return None
 
         # Determine direction and edge
@@ -145,16 +162,19 @@ class CryptoMomentumStrategy:
         our_prob = min(0.70, our_prob)
 
         edge = our_prob - market_price
-        if edge < -0.10:
-            logger.debug(
-                f"{coin}: market strongly against us ({edge:.3f}), skipping"
+        if edge < self.MIN_EDGE:
+            logger.info(
+                f"{coin}: insufficient edge ({edge:.3f} < {self.MIN_EDGE}), skipping"
             )
             return None
-        edge = max(0.005, edge)
 
         # Conviction-based sizing: 4-8% of balance
+        # Directional adjustment: UP bets historically 32% WR vs DOWN 60% WR,
+        # so halve UP position sizes until this asymmetry is understood
         conviction = min(1.0, abs(momentum_score) / 0.3)
         size_pct = 0.04 + 0.04 * conviction
+        if direction == "up":
+            size_pct *= 0.5
         size_usdc = balance * size_pct
         size_usdc = min(size_usdc, target.liquidity * 0.1)
         size_usdc = max(5.0, size_usdc)
@@ -239,6 +259,9 @@ class CryptoMomentumStrategy:
 
             # 1-hour trend (weight: 0.05) — broader context
             score += max(-0.05, min(0.05, ta["trend_1h"] / 1.0 * 0.05))
+
+            # 4-hour trend (weight: 0.05) — macro direction for 1h candles
+            score += max(-0.05, min(0.05, ta["trend_4h"] / 2.0 * 0.05))
 
             # Volume confirmation (weight: 0.05) — amplify when volume agrees
             if ta["volume_ratio"] > 1.5 and abs(ta["trend_5m"]) > 0.03:

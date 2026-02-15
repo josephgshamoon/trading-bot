@@ -688,7 +688,7 @@ def cmd_fast(config: dict):
             except Exception as e:
                 logger.error(f"Gamma resolution error: {e}")
 
-        # Pass 3: Profit-taking — sell positions that have moved in our favor
+        # Pass 4: Profit-taking — sell positions that have moved in our favor
         _check_profit_taking(engine, config, journal)
 
     if resolved_count:
@@ -768,18 +768,29 @@ def cmd_fast(config: dict):
                 cycle_signals.append(sig_record)
                 continue
 
-            # Skip if we already have a position in this market
-            # EXCEPTION: crypto momentum allows scaling (adding to same slot)
+            # Skip if we already have a position in this market/slot
             is_crypto = sig.metadata.get("strategy") in ("crypto_momentum_15m", "crypto_momentum_1h")
             existing_markets = set()
+            existing_slots = set()  # track slot_start timestamps to prevent duplicates
             if engine.session:
                 for p in engine.session.positions:
                     if p.get("status") == "open":
                         existing_markets.add(p.get("market_id"))
+                        # Track slot timestamps for crypto positions
+                        p_meta = p.get("metadata", {})
+                        if p_meta.get("slot_start"):
+                            existing_slots.add(p_meta["slot_start"])
                 if not is_crypto:
-                    # Only check closed trades for non-crypto (crypto slots are unique anyway)
                     for p in engine.session.closed_trades:
                         existing_markets.add(p.get("market_id"))
+
+            # Block duplicate crypto trades on the same slot
+            if is_crypto and sig.metadata.get("slot_start") in existing_slots:
+                sig_record["action"] = "skipped"
+                sig_record["skip_reason"] = "already have position on this slot"
+                cycle_signals.append(sig_record)
+                continue
+
             if sig.market_id in existing_markets and not is_crypto:
                 sig_record["action"] = "skipped"
                 sig_record["skip_reason"] = "already have position"
@@ -850,8 +861,8 @@ def cmd_fast(config: dict):
                 recent = journal.get_recent_trades(n=50)
                 one_hour_ago = (now - timedelta(hours=1)).isoformat()
                 hour_trades = [t for t in recent if t.get("ts", "") >= one_hour_ago]
-                h_wins = sum(1 for t in hour_trades if t.get("outcome") == "won")
-                h_losses = sum(1 for t in hour_trades if t.get("outcome") == "lost")
+                h_wins = sum(1 for t in hour_trades if t.get("outcome") in ("won", "sold_profit"))
+                h_losses = sum(1 for t in hour_trades if t.get("outcome") in ("lost", "sold_loss"))
                 h_pnl = sum(t.get("pnl", 0) for t in hour_trades)
 
                 # Session PnL
@@ -1211,38 +1222,25 @@ def _check_profit_taking(engine, config: dict, journal):
         max_profit = shares * 1.0 - cost
         profit_captured = potential_pnl / max_profit if max_profit > 0 else 0
 
-        # Profit-taking conditions vary by strategy:
+        # Profit-taking conditions vary by strategy.
         # No stop-loss for binary hourly candles — mid-candle dips are noise,
         # the position resolves to $1 or $0 at candle close regardless.
-        is_stop_loss = False
         if strategy in ("crypto_momentum_15m", "crypto_momentum_1h"):
             # CRYPTO: cash out at 80%+ ROI — lock in profit
-            # e.g., bought at $0.50, bid now at $0.90 → 80% return → sell
-            if roi >= 0.80 and potential_pnl > 0.10:
-                should_sell = True
-            else:
-                should_sell = False
+            should_sell = roi >= 0.80 and potential_pnl > 0.10
         else:
             # NON-CRYPTO: sell if >80% of max profit captured or >15% ROI
             should_sell = (roi > 0.15 and potential_pnl > 0.50) or (profit_captured > 0.80 and potential_pnl > 0.50)
 
         if should_sell:
-            # ── Analysis ──────────────────────────────────
             direction = meta.get("direction", "?")
             momentum = meta.get("momentum_score", 0)
             coin = meta.get("coin", "?")
-            if is_stop_loss:
-                exit_type = "stop_loss"
-                analysis = (
-                    f"STOP-LOSS at {roi:.0%} ROI | Entry ${entry_price:.3f} -> Bid ${current_bid:.3f}\n"
-                    f"Momentum was {momentum:+.2f} ({direction.upper()}) — cutting loss to limit damage"
-                )
-            else:
-                exit_type = "profit_taking"
-                analysis = (
-                    f"Early exit at {roi:.0%} ROI | Entry ${entry_price:.3f} -> Bid ${current_bid:.3f}\n"
-                    f"Momentum was {momentum:+.2f} ({direction.upper()}) — signal correct, taking profit"
-                )
+            exit_type = "profit_taking"
+            analysis = (
+                f"Early exit at {roi:.0%} ROI | Entry ${entry_price:.3f} -> Bid ${current_bid:.3f}\n"
+                f"Momentum was {momentum:+.2f} ({direction.upper()}) — signal correct, taking profit"
+            )
 
             logger.info(
                 f"{exit_type}: {pos.get('trade_id')} | "
@@ -1252,13 +1250,12 @@ def _check_profit_taking(engine, config: dict, journal):
             if result.get("status") == "sold":
                 actual_pnl = result.get("pnl", 0)
                 actual_roi = (actual_pnl / cost * 100) if cost > 0 else 0
-                label = "STOP-LOSS" if is_stop_loss else "PROFIT TAKEN"
                 print(
-                    f"  >> {label}: {pos.get('trade_id')} | "
+                    f"  >> PROFIT TAKEN: {pos.get('trade_id')} | "
                     f"${actual_pnl:+.2f} ({actual_roi:.0f}% ROI)"
                 )
                 if journal:
-                    outcome = "sold_loss" if is_stop_loss else "sold_profit"
+                    outcome = "sold_profit"
                     journal.log_resolution(
                         trade_id=pos.get("trade_id", ""),
                         market_id=pos.get("market_id", ""),
@@ -1273,14 +1270,11 @@ def _check_profit_taking(engine, config: dict, journal):
                         size_usdc=cost,
                         metadata={**meta, "exit_type": exit_type, "roi": actual_roi, "analysis": analysis},
                     )
-                # Telegram notification for stop-loss/profit-taking
                 from .notifications.telegram import TelegramNotifier
                 notifier = TelegramNotifier()
                 if notifier.is_configured():
-                    emoji = "\U0001f6d1" if is_stop_loss else "\U0001f4b0"
-                    label_tg = "STOP-LOSS" if is_stop_loss else "PROFIT"
                     notifier.send_message(
-                        f"{emoji} <b>{label_tg} ${actual_pnl:+.2f}</b> "
+                        f"\U0001f4b0 <b>PROFIT ${actual_pnl:+.2f}</b> "
                         f"{coin.upper() if coin != '?' else ''} {direction.upper()}\n"
                         f"ROI: {actual_roi:+.0f}% | Entry ${entry_price:.3f} -> ${current_bid:.3f}"
                     )
