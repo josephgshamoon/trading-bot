@@ -4,8 +4,8 @@
 Reads the trade journal, computes stats, stores a performance snapshot
 in Supermemory, and sends a Telegram summary if there are new trades.
 
-Cron entry:
-  0 */6 * * * cd ~/polymarket-bot/trading-bot && venv/bin/python scripts/monitor.py >> logs/monitor.log 2>&1
+Cron entry (update path to match your setup):
+  0 */6 * * * cd /path/to/trading-bot && venv/bin/python scripts/monitor.py >> logs/monitor.log 2>&1
 """
 
 import json

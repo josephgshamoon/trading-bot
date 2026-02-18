@@ -1,9 +1,14 @@
 #!/bin/bash
-# Ensure the SOCKS5 SSH tunnel to the Lithuanian proxy VPS is running.
-# Used by cron_run.sh before each trading cycle and on server reboot.
+# Ensure a SOCKS5 SSH tunnel to your proxy VPS is running.
+# Used by cron scripts before each trading cycle (for geo-blocked regions).
 #
 # The tunnel routes Polymarket CLOB API requests through a non-restricted
 # IP to bypass geo-blocking (UK/US/FR).
+#
+# Setup:
+#   1. Put your proxy SSH key at .ssh/proxy_key
+#   2. Set PROXY_HOST below to your VPS user@ip
+#   3. Run: ./scripts/ensure_tunnel.sh
 #
 # Usage:
 #   ./scripts/ensure_tunnel.sh          # Check and start if needed
@@ -11,8 +16,8 @@
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 KEY="$PROJECT_DIR/.ssh/proxy_key"
-PROXY_HOST="root@76.13.79.61"
-LOCAL_PORT=1080
+PROXY_HOST="${PROXY_SSH_HOST:-user@your-proxy-ip}"
+LOCAL_PORT="${PROXY_LOCAL_PORT:-1080}"
 PID_FILE="$PROJECT_DIR/.ssh/tunnel.pid"
 
 kill_tunnel() {

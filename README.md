@@ -1,6 +1,6 @@
 # Polymarket Trading Bot
 
-Automated trading bot for [Polymarket](https://polymarket.com) prediction markets. Scans for mispriced markets, analyzes news with LLMs, and executes trades via the CLOB API.
+Free, open-source trading bot for [Polymarket](https://polymarket.com) prediction markets. Scans for mispriced markets, analyzes news with AI, and executes trades via the CLOB API.
 
 Supports **paper trading** (simulated) and **live trading** (real USDC on Polygon).
 
@@ -11,8 +11,8 @@ Supports **paper trading** (simulated) and **live trading** (real USDC on Polygo
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/joeyquack/trading-bot.git
-cd trading-bot
+git clone https://github.com/josephgshamoon/polymarket-trading-bot.git
+cd polymarket-trading-bot
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -52,7 +52,7 @@ This derives your API key, secret, and passphrase from your private key and writ
 ### 3. Run it
 
 ```bash
-# Scan markets for opportunities
+# Scan all markets for opportunities
 python -m src.main scan
 
 # Start paper trading (simulated, no real money)
@@ -63,6 +63,63 @@ python -m src.main report
 ```
 
 That's it. You're running.
+
+---
+
+## Choosing Which Markets to Trade
+
+By default the bot scans **all active Polymarket markets** that pass the volume/liquidity filters. You can control what it trades by editing `config/default.yaml`:
+
+### Filter by volume and liquidity
+
+```yaml
+filters:
+  min_volume_usd: 10000      # Only markets with $10k+ volume
+  min_liquidity_usd: 5000    # Only markets with $5k+ liquidity
+  active_only: true           # Skip closed/resolved markets
+  min_hours_to_end: 24        # Skip markets ending within 24 hours
+```
+
+Lower these numbers to scan more markets. Raise them to focus on larger, more liquid ones.
+
+### Filter by probability range
+
+```yaml
+risk:
+  min_entry_probability: 0.15   # Skip markets priced below 15%
+  max_entry_probability: 0.85   # Skip markets priced above 85%
+```
+
+This keeps the bot in the "sweet spot" where there's enough edge to trade. Markets near 0% or 100% are usually priced correctly.
+
+### Choose a strategy
+
+```yaml
+strategy:
+  active: news_enhanced       # news_enhanced | value_betting | momentum | arbitrage
+```
+
+Each strategy has its own parameters below it in the config file. Adjust `min_edge`, `kelly_fraction`, etc. to be more or less aggressive.
+
+### Adjust position sizing
+
+```yaml
+trading:
+  default_position_usdc: 10.0   # Default bet size
+  max_position_usdc: 50.0       # Max single bet
+  min_position_usdc: 2.0        # Minimum bet
+
+backtest:
+  starting_balance_usdc: 200.0  # Starting paper balance
+```
+
+### Use verbose mode to see what's happening
+
+```bash
+python -m src.main scan -v
+```
+
+This shows every market the bot evaluates: the price, volume, estimated edge, and why it was skipped or signaled. Great for understanding what the bot is doing and tuning your filters.
 
 ---
 
@@ -177,13 +234,13 @@ The bot has three safety gates before it will execute real trades:
 crontab -e
 ```
 ```
-0 */4 * * * /path/to/trading-bot/cron_run.sh >> /path/to/trading-bot/logs/cron.log 2>&1
+0 */4 * * * /path/to/polymarket-trading-bot/cron_run.sh >> /path/to/polymarket-trading-bot/logs/cron.log 2>&1
 ```
 
 ### Short-term fast-cycle (every minute)
 
 ```
-* * * * * /path/to/trading-bot/cron_fast.sh >> /path/to/trading-bot/logs/fast.log 2>&1
+* * * * * /path/to/polymarket-trading-bot/cron_fast.sh >> /path/to/polymarket-trading-bot/logs/fast.log 2>&1
 ```
 
 ---
@@ -191,7 +248,7 @@ crontab -e
 ## Project Structure
 
 ```
-trading-bot/
+polymarket-trading-bot/
 ├── src/
 │   ├── main.py                    # CLI entry point (all commands)
 │   ├── config.py                  # YAML config loader
@@ -208,7 +265,7 @@ trading-bot/
 │   │   ├── crypto_model.py       # Crypto probability modeling
 │   │   ├── categorizer.py        # Market categorization
 │   │   ├── journal.py            # Trade journal (JSONL, per-day)
-│   │   └── memory.py             # Persistent bot memory
+│   │   └── memory.py             # Persistent bot memory (optional)
 │   ├── intelligence/
 │   │   └── analyzer.py           # LLM-powered news analysis (Claude/OpenAI)
 │   ├── strategy/
@@ -232,42 +289,19 @@ trading-bot/
 │   └── utils/
 │       └── logger.py             # Logging setup
 ├── config/
-│   └── default.yaml              # All bot settings
+│   └── default.yaml              # All bot settings (edit this)
 ├── scripts/
 │   ├── setup_api_creds.py        # Derive API keys from private key
 │   ├── generate_test_data.py     # Generate synthetic test data
 │   ├── monitor.py                # Performance monitoring
 │   └── ensure_tunnel.sh          # Proxy tunnel helper
-├── tests/                        # Unit tests (50 tests)
+├── tests/                        # Unit tests
 ├── data/                         # Snapshots, sessions, journals (auto-created)
 ├── logs/                         # Log files (auto-created)
 ├── .env.example                  # API key template
 ├── cron_run.sh                   # Cron: long-term trading (4h)
 ├── cron_fast.sh                  # Cron: short-term trading (1m)
 └── requirements.txt              # Python dependencies
-```
-
----
-
-## Configuration
-
-All settings are in `config/default.yaml`. Key things to change:
-
-```yaml
-trading:
-  mode: paper                    # paper or live
-  default_position_usdc: 10.0   # How much per trade
-  max_position_usdc: 50.0       # Max single trade size
-
-risk:
-  max_daily_loss_usdc: 40.0     # Stop after this daily loss
-  max_drawdown_pct: 20.0        # Kill switch threshold
-
-strategy:
-  active: news_enhanced          # Which strategy to use
-
-backtest:
-  starting_balance_usdc: 200.0  # Paper trading starting balance
 ```
 
 ---
@@ -279,6 +313,9 @@ A: No. It starts in paper mode. Live trading requires you to explicitly set `POL
 
 **Q: Do I need all the API keys?**
 A: No. Just the Polymarket keys to scan markets. LLM and news keys make the `news_enhanced` strategy smarter, but it works without them.
+
+**Q: How do I target specific types of markets?**
+A: Edit `config/default.yaml`. Use the `filters` section to set volume/liquidity thresholds, and the `risk` section to set probability bounds. Run `scan -v` to see what the bot evaluates.
 
 **Q: I'm getting 403 errors on live trades.**
 A: Polymarket blocks order placement from certain countries. Set `POLYMARKET_PROXY_URL` in your `.env` to a SOCKS5 or HTTP proxy.

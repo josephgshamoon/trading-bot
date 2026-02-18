@@ -19,10 +19,18 @@ secrets/
 *.pem
 *.key
 
-# Data (large files)
+# Data (generated at runtime — don't commit personal trading data)
+data/*.json
+data/*.jsonl
 data/*.csv
 data/*.parquet
+data/.last_*
+!data/.gitkeep
 logs/*.log
+logs/*.log.old
+
+# SSH keys / proxy tunnel
+.ssh/
 
 # IDE
 .vscode/
