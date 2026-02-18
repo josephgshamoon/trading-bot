@@ -1,8 +1,12 @@
 #!/bin/bash
 # Trading bot cron job — collects snapshots + runs news-enhanced paper trading
-# Cron entry: 0 */4 * * * ~/polymarket-bot/trading-bot/cron_run.sh >> ~/polymarket-bot/trading-bot/logs/cron.log 2>&1
+# Usage: crontab -e, then add:
+#   0 */4 * * * /path/to/trading-bot/cron_run.sh >> /path/to/trading-bot/logs/cron.log 2>&1
 
-cd ~/polymarket-bot/trading-bot || exit 1
+# Resolve the directory this script lives in (works from any cwd)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR" || exit 1
+
 source venv/bin/activate
 
 # Load environment variables for API keys

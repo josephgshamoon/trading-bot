@@ -34,7 +34,7 @@ from .utils.logger import setup_logger
 from .exchange.polymarket_client import PolymarketClient
 from .data.feed import DataFeed
 from .data.indicators import MarketIndicators
-from .data.news_feed import NewsFeed
+from .data.news_feed import NewsFeed, RSS_FEEDS
 from .data.categorizer import MarketCategorizer
 from .intelligence.analyzer import MarketAnalyzer
 from .strategy import STRATEGIES
@@ -372,9 +372,6 @@ def cmd_status(config: dict):
     print(f"    Kill Switch: {'ACTIVE' if risk_status['kill_switch'] else 'off'}")
     print(f"{'='*50}\n")
 
-
-# Import RSS_FEEDS for status display
-from .data.news_feed import RSS_FEEDS
 
 
 def cmd_resolve(config: dict):
