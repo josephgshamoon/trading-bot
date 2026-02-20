@@ -20,9 +20,27 @@ python3 run.py search "bitcoin"     # Search markets by keyword
 python3 run.py market <ID>          # View market details + token IDs
 python3 run.py paper <ID>           # Paper trade (simulated, no real money)
 python3 run.py trade <ID>           # Real trade (requires wallet setup below)
+python3 run.py auto <ID> --side yes # Auto-trade (continuous monitoring)
 python3 run.py backtest             # Run strategy backtest
 python3 run.py collect              # Collect market data snapshot
 ```
+
+## Auto-Trading
+
+The `auto` command places an order and then continuously monitors the position — checking live prices, enforcing a stop-loss, and detecting market resolution. It runs until the market resolves, a stop-loss is hit, or you press Ctrl+C.
+
+```bash
+python3 run.py auto <MARKET_ID> --side yes --amount 1 --interval 60 --stop-loss 50
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--side` | *(required)* | `yes` or `no` |
+| `--amount` | 1.0 | USDC to spend |
+| `--interval` | 60 | Seconds between price checks |
+| `--stop-loss` | 50 | Exit if price drops by this % from entry |
+
+Requires wallet setup (see below). You will be asked to type "confirm" before the order is placed. Telegram notifications are sent on entry, exit, and resolution if configured.
 
 ## Real Trading (optional)
 
@@ -67,6 +85,7 @@ polymarket-bot/
   src/
     polymarket_client.py    # Polymarket API client
     trader.py               # Real trading (py-clob-client)
+    auto_trader.py          # Auto-trading engine (continuous)
     paper_trader.py         # Paper trading
     backtest.py             # Backtesting engine
     data_collector.py       # Market data collection

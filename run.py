@@ -8,6 +8,7 @@ Usage:
     python3 run.py market <ID>          # View market details + token IDs
     python3 run.py paper <ID>           # Paper trade (simulated)
     python3 run.py trade <ID>           # Real trade (needs .env + py-clob-client)
+    python3 run.py auto <ID> --side yes # Auto-trade (continuous monitoring)
     python3 run.py backtest             # Run strategy backtest
     python3 run.py collect              # Collect market data snapshot
 """
@@ -312,6 +313,58 @@ def cmd_trade(args):
         print(f"\n  Trade failed: {e}")
 
 
+def cmd_auto(args):
+    """Run auto-trading loop on a market."""
+    load_env()
+    if not os.environ.get("POLYMARKET_PRIVATE_KEY"):
+        print("\n  Error: POLYMARKET_PRIVATE_KEY not set.")
+        print("  Copy .env.example to .env and add your wallet private key.")
+        print("  This is only needed for real trading.\n")
+        return
+
+    from src.polymarket_client import PolymarketClient
+    client = PolymarketClient()
+    m = client.get_market(args.id)
+
+    if not m:
+        print(f"Market '{args.id}' not found.")
+        return
+
+    question = m.get("question", "Unknown")
+    probs = get_outcome_prices(m)
+    yes_price = float(probs[0]) if probs else 0.5
+    side = args.side.upper()
+    entry_price = yes_price if side == "YES" else (1 - yes_price)
+
+    print(f"\n{'='*50}")
+    print(f"  AUTO-TRADE PLAN")
+    print(f"{'='*50}")
+    print(f"  Market:    {question[:55]}")
+    print(f"  Side:      {side}")
+    print(f"  Amount:    ${args.amount:.2f} USDC")
+    print(f"  Price:     {entry_price*100:.1f}%")
+    print(f"  Interval:  {args.interval}s")
+    print(f"  Stop-loss: {args.stop_loss}%")
+    print(f"{'='*50}")
+    print(f"\n  This will place a REAL order with real USDC.")
+    print(f"  The bot will monitor until resolution, stop-loss, or Ctrl+C.\n")
+
+    confirm = input("  Type 'confirm' to start: ").strip().lower()
+    if confirm != "confirm":
+        print("  Cancelled.")
+        return
+
+    from src.auto_trader import AutoTrader
+    trader = AutoTrader(
+        market_id=args.id,
+        side=args.side,
+        amount=args.amount,
+        interval=args.interval,
+        stop_loss_pct=args.stop_loss,
+    )
+    trader.start()
+
+
 def cmd_backtest(args):
     """Run strategy backtest."""
     from src.backtest import run_quick_backtest
@@ -342,6 +395,7 @@ def main():
             "  python3 run.py market <ID>           View market details\n"
             "  python3 run.py paper <ID>            Paper trade (simulated)\n"
             "  python3 run.py trade <ID>            Real trade (needs .env)\n"
+            "  python3 run.py auto <ID> --side yes  Auto-trade (continuous)\n"
             "  python3 run.py backtest              Run strategy backtest\n"
             "  python3 run.py collect               Collect data snapshot\n"
         ),
@@ -369,6 +423,14 @@ def main():
     p_trade = sub.add_parser("trade", help="Real trade (requires .env + py-clob-client)")
     p_trade.add_argument("id", help="Market ID")
 
+    # auto
+    p_auto = sub.add_parser("auto", help="Auto-trade: place order, monitor, enforce stops")
+    p_auto.add_argument("id", help="Market ID")
+    p_auto.add_argument("--side", required=True, choices=["yes", "no"], help="Side to buy (yes or no)")
+    p_auto.add_argument("--amount", type=float, default=1.0, help="Amount in USDC (default: 1.0)")
+    p_auto.add_argument("--interval", type=int, default=60, help="Monitor interval in seconds (default: 60)")
+    p_auto.add_argument("--stop-loss", type=float, default=50.0, dest="stop_loss", help="Stop-loss %% (default: 50)")
+
     # backtest
     sub.add_parser("backtest", help="Run strategy backtest")
 
@@ -387,6 +449,7 @@ def main():
         "market": cmd_market,
         "paper": cmd_paper,
         "trade": cmd_trade,
+        "auto": cmd_auto,
         "backtest": cmd_backtest,
         "collect": cmd_collect,
     }
