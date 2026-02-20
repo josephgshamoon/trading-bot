@@ -76,8 +76,8 @@ class PolymarketClient:
         return market
 
     def get_markets(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get all active markets"""
-        endpoint = f"/markets?limit={limit}&active=true"
+        """Get active markets sorted by 24h volume"""
+        endpoint = f"/markets?limit={limit}&active=true&closed=false&order=volume24hr&ascending=false"
         data = self._fetch(endpoint)
         # API returns list directly for markets endpoint
         if isinstance(data, list):
@@ -103,14 +103,10 @@ class PolymarketClient:
         return self._fetch(endpoint)
     
     def search_markets(self, query: str) -> List[Dict[str, Any]]:
-        """Search markets by keyword"""
-        endpoint = f"/markets?search={quote(query)}"
-        data = self._fetch(endpoint)
-        if isinstance(data, list):
-            markets = data
-        else:
-            markets = data.get("markets", [])
-        return [self._normalize_market(m) for m in markets]
+        """Search active markets by keyword (client-side filter)."""
+        markets = self.get_markets(limit=200)
+        query_lower = query.lower()
+        return [m for m in markets if query_lower in m.get("question", "").lower()]
     
     def get_market_history(self, market_id: str, start: str = None, end: str = None) -> List[Dict[str, Any]]:
         """Get price history for a market"""
