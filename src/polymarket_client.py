@@ -8,6 +8,7 @@ import logging
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 
@@ -62,19 +63,33 @@ class PolymarketClient:
             logger.error(f"JSON decode error fetching {endpoint}: {e}")
             raise
     
+    def _normalize_market(self, market: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize API fields so downstream code can use consistent names."""
+        # outcomePrices may be a JSON string — parse it into a list
+        raw = market.get("outcomePrices") or market.get("outcome_prices")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                raw = []
+        market["outcome_prices"] = raw if isinstance(raw, list) else []
+        return market
+
     def get_markets(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get all active markets"""
         endpoint = f"/markets?limit={limit}&active=true"
         data = self._fetch(endpoint)
         # API returns list directly for markets endpoint
         if isinstance(data, list):
-            return data[:limit]
-        return data.get("markets", [])[:limit]
+            markets = data[:limit]
+        else:
+            markets = data.get("markets", [])[:limit]
+        return [self._normalize_market(m) for m in markets]
     
     def get_market(self, market_id: str) -> Dict[str, Any]:
         """Get specific market by ID"""
         endpoint = f"/markets/{market_id}"
-        return self._fetch(endpoint)
+        return self._normalize_market(self._fetch(endpoint))
     
     def get_tickers(self) -> List[Dict[str, Any]]:
         """Get market tickers with odds"""
@@ -89,9 +104,13 @@ class PolymarketClient:
     
     def search_markets(self, query: str) -> List[Dict[str, Any]]:
         """Search markets by keyword"""
-        endpoint = f"/markets?search={query}"
+        endpoint = f"/markets?search={quote(query)}"
         data = self._fetch(endpoint)
-        return data.get("markets", [])
+        if isinstance(data, list):
+            markets = data
+        else:
+            markets = data.get("markets", [])
+        return [self._normalize_market(m) for m in markets]
     
     def get_market_history(self, market_id: str, start: str = None, end: str = None) -> List[Dict[str, Any]]:
         """Get price history for a market"""

@@ -1,8 +1,14 @@
-# Trading Bot Dependencies
+# Core dependencies (required)
 pyyaml>=6.0
 requests>=2.31.0
-python-telegram-bot>=20.0
+
+# Development / testing
 pytest>=7.0.0
 pytest-cov>=4.0.0
-black>=23.0.0
-mypy>=1.0.0
+
+# Optional: Telegram notifications
+# python-telegram-bot>=20.0    # Not needed — bot uses urllib directly
+
+# Optional: Real trading (only needed for `python3 run.py trade`)
+# pip install py-clob-client
+# py-clob-client>=0.1.0

@@ -38,7 +38,7 @@ data:
 # === NOTIFICATIONS ===
 notifications:
   telegram:
-    enabled: true
+    enabled: false
     bot_token: "${TELEGRAM_BOT_TOKEN}"
     chat_id: "${TELEGRAM_CHAT_ID}"
   alerts:
@@ -55,6 +55,18 @@ logging:
   file: "logs/trading_bot.log"
   daily_rotation: true
   retention_days: 30
+
+# === STRATEGY ===
+strategy:
+  min_probability: 0.10
+  max_probability: 0.90
+  position_size: 1.0
+  min_volume: 50000
+  min_liquidity: 10000
+  volume_multiplier: 2.0
+  odds_change_threshold: 0.05
+  fee_percent: 0.02
+  slippage_percent: 0.01
 
 # === SAFETY FEATURES ===
 safety:

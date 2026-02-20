@@ -13,6 +13,7 @@ Safety: NO real trades, all decisions logged for analysis
 
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -179,22 +180,26 @@ class PaperTrader:
         # Load config
         with open(config_path) as f:
             self.config = yaml.safe_load(f)
-        
+
         # Initialize components
         self.client = PolymarketClient()
         self.strategy_config = StrategyConfig(config_path)
         self.session = PaperTradingSession()
-        
-        # Telegram
-        self.telegram = TelegramNotifier(
-            bot_token=self.config["notifications"]["telegram"]["bot_token"],
-            chat_id=self.config["notifications"]["telegram"]["chat_id"]
-        )
-        
+
+        # Telegram (optional - only if env vars are set)
+        self.telegram = None
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if bot_token and chat_id and not bot_token.startswith("${"):
+            self.telegram = TelegramNotifier(bot_token=bot_token, chat_id=chat_id)
+            logger.info("Telegram notifications enabled")
+        else:
+            logger.info("Telegram not configured — notifications disabled")
+
         # State
         self.seen_signals = set()
         self.pending_approvals = {}  # market_id -> signal
-        
+
         logger.info("Paper Trader initialized")
         logger.info(f"Mode: {self.config['mode']['automation_level']}")
     
@@ -286,8 +291,9 @@ class PaperTrader:
             self.session.signals_received += 1
             new_count += 1
             
-            # Send Telegram alert
-            self.telegram.send_trade_signal(signal)
+            # Send Telegram alert if configured
+            if self.telegram:
+                self.telegram.send_trade_signal(signal)
             self.pending_approvals[signal_id] = signal
             
             logger.info(f"📨 Signal sent for approval: {signal['market_question'][:40]}...")
@@ -418,7 +424,8 @@ class PaperTrader:
     
     def send_summary(self):
         """Send daily summary to Telegram"""
-        self.telegram.send_daily_summary(self.session)
+        if self.telegram:
+            self.telegram.send_daily_summary(self.session)
 
 
 def run_paper_trader():
