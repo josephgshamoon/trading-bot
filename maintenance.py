@@ -54,6 +54,7 @@ def check_imports():
     log("Checking imports...")
     modules = [
         "src.polymarket_client",
+        "src.auto_trader",
         "src.backtest",
         "src.data_collector",
         "src.paper_trader",
