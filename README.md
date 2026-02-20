@@ -5,8 +5,8 @@ A trading bot for Polymarket prediction markets. Browse markets, paper trade, ba
 ## Setup
 
 ```bash
-git clone https://github.com/joeyquack/polymarket-bot.git
-cd polymarket-bot
+git clone https://github.com/josephgshamoon/trading-bot.git
+cd trading-bot
 pip install -r requirements.txt
 ```
 

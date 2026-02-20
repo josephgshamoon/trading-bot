@@ -24,10 +24,10 @@ class TestPolymarketClient:
         markets = client.get_markets(limit=10)
         assert isinstance(markets, list)
     
-    def test_get_tickers(self, client):
-        """Test fetching tickers"""
-        tickers = client.get_tickers()
-        assert isinstance(tickers, list)
+    def test_search_markets(self, client):
+        """Test searching markets by keyword"""
+        results = client.search_markets("bitcoin")
+        assert isinstance(results, list)
     
     def test_clear_cache(self, client):
         """Test cache clearing"""

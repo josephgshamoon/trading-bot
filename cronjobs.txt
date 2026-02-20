@@ -7,3 +7,6 @@
 
 # Also run paper trader every hour to check for signals
 5 * * * * /usr/bin/python3 /home/clawdbot/polymarket-bot/src/paper_trader.py --scan >> /home/clawdbot/polymarket-bot/logs/paper_trader.log 2>&1
+
+# Weekly maintenance: health checks, tests, auto-fix, commit/push (Sundays 3am UTC)
+0 3 * * 0 /usr/bin/python3 /home/clawdbot/polymarket-bot/maintenance.py >> /home/clawdbot/polymarket-bot/logs/maintenance.log 2>&1

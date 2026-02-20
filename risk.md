@@ -32,4 +32,4 @@
 - Daily summary generated
 
 ## Emergency Contacts
-- Primary: Joey (Telegram)
+- Primary: (configure in .env)
