@@ -20,7 +20,8 @@ python3 run.py search "bitcoin"     # Search markets by keyword
 python3 run.py market <ID>          # View market details + token IDs
 python3 run.py paper <ID>           # Paper trade (simulated, no real money)
 python3 run.py trade <ID>           # Real trade (requires wallet setup below)
-python3 run.py auto <ID> --side yes # Auto-trade (continuous monitoring)
+python3 run.py auto                 # Auto-trade (interactive mode)
+python3 run.py auto <ID> --side yes # Auto-trade (direct mode)
 python3 run.py backtest             # Run strategy backtest
 python3 run.py collect              # Collect market data snapshot
 ```
@@ -29,13 +30,21 @@ python3 run.py collect              # Collect market data snapshot
 
 The `auto` command places an order and then continuously monitors the position — checking live prices, enforcing a stop-loss, and detecting market resolution. It runs until the market resolves, a stop-loss is hit, or you press Ctrl+C.
 
+**Interactive mode** — run with no arguments to search/browse markets, pick one, and configure the trade interactively:
+
+```bash
+python3 run.py auto
+```
+
+**Direct mode** — pass a market ID and flags directly:
+
 ```bash
 python3 run.py auto <MARKET_ID> --side yes --amount 1 --interval 60 --stop-loss 50
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--side` | *(required)* | `yes` or `no` |
+| `--side` | *(required in direct mode)* | `yes` or `no` |
 | `--amount` | 1.0 | USDC to spend |
 | `--interval` | 60 | Seconds between price checks |
 | `--stop-loss` | 50 | Exit if price drops by this % from entry |

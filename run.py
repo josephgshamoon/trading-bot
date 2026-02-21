@@ -8,7 +8,8 @@ Usage:
     python3 run.py market <ID>          # View market details + token IDs
     python3 run.py paper <ID>           # Paper trade (simulated)
     python3 run.py trade <ID>           # Real trade (needs .env + py-clob-client)
-    python3 run.py auto <ID> --side yes # Auto-trade (continuous monitoring)
+    python3 run.py auto                 # Auto-trade (interactive)
+    python3 run.py auto <ID> --side yes # Auto-trade (direct)
     python3 run.py backtest             # Run strategy backtest
     python3 run.py collect              # Collect market data snapshot
 """
@@ -313,6 +314,117 @@ def cmd_trade(args):
         print(f"\n  Trade failed: {e}")
 
 
+def _interactive_auto():
+    """Interactive auto-trading flow: search/browse → select → configure → launch."""
+    from src.polymarket_client import PolymarketClient
+    client = PolymarketClient()
+
+    # Step 1: Search or browse
+    print()
+    query = input("  Search or browse? (enter keyword, or press Enter for top markets): ").strip()
+
+    if query:
+        markets = client.search_markets(query)
+        if not markets:
+            print(f"\n  No markets found for '{query}'.")
+            return
+        markets = markets[:20]
+        print(f"\n{'='*70}")
+        print(f" Results for '{query}' ({len(markets)} found)")
+        print(f"{'='*70}\n")
+    else:
+        markets = client.get_markets(limit=20)
+        if not markets:
+            print("\n  No markets found.")
+            return
+        print(f"\n{'='*70}")
+        print(f" Top {len(markets)} Active Markets")
+        print(f"{'='*70}\n")
+
+    for i, m in enumerate(markets, 1):
+        question = m.get("question", "Unknown")
+        volume = float(m.get("volume", 0))
+        liquidity = float(m.get("liquidity", 0))
+        probs = get_outcome_prices(m)
+        yes_str = f"{float(probs[0])*100:.0f}%" if probs else "?"
+
+        print(f"  {i:>3}. {question[:65]}")
+        print(f"       YES: {yes_str}  |  Vol: ${volume:,.0f}  |  Liq: ${liquidity:,.0f}")
+        print()
+
+    # Step 2: Pick a market
+    try:
+        pick = int(input(f"  Pick a market (1-{len(markets)}): ").strip())
+    except (ValueError, EOFError):
+        print("  Invalid selection.")
+        return
+    if pick < 1 or pick > len(markets):
+        print("  Invalid selection.")
+        return
+
+    selected = markets[pick - 1]
+    market_id = selected.get("id", "")
+
+    # Step 3: Configure trade parameters
+    side_input = input("  Side (yes/no): ").strip().lower()
+    if side_input not in ("yes", "no"):
+        print("  Invalid side. Use 'yes' or 'no'.")
+        return
+
+    try:
+        amount = float(input("  Amount in USDC [1.0]: ").strip() or "1.0")
+    except ValueError:
+        print("  Invalid amount.")
+        return
+
+    try:
+        interval = int(input("  Monitor interval in seconds [60]: ").strip() or "60")
+    except ValueError:
+        print("  Invalid interval.")
+        return
+
+    try:
+        stop_loss = float(input("  Stop-loss % [50]: ").strip() or "50")
+    except ValueError:
+        print("  Invalid stop-loss.")
+        return
+
+    # Step 4: Show plan and confirm
+    question = selected.get("question", "Unknown")
+    probs = get_outcome_prices(selected)
+    yes_price = float(probs[0]) if probs else 0.5
+    side_upper = side_input.upper()
+    entry_price = yes_price if side_upper == "YES" else (1 - yes_price)
+
+    print(f"\n{'='*50}")
+    print(f"  AUTO-TRADE PLAN")
+    print(f"{'='*50}")
+    print(f"  Market:    {question[:55]}")
+    print(f"  Side:      {side_upper}")
+    print(f"  Amount:    ${amount:.2f} USDC")
+    print(f"  Price:     {entry_price*100:.1f}%")
+    print(f"  Interval:  {interval}s")
+    print(f"  Stop-loss: {stop_loss}%")
+    print(f"{'='*50}")
+    print(f"\n  This will place a REAL order with real USDC.")
+    print(f"  The bot will monitor until resolution, stop-loss, or Ctrl+C.\n")
+
+    confirm = input("  Type 'confirm' to start: ").strip().lower()
+    if confirm != "confirm":
+        print("  Cancelled.")
+        return
+
+    from src.auto_trader import AutoTrader
+    trader = AutoTrader(
+        market_id=market_id,
+        side=side_input,
+        amount=amount,
+        interval=interval,
+        stop_loss_pct=stop_loss,
+    )
+    trader.start()
+
+
 def cmd_auto(args):
     """Run auto-trading loop on a market."""
     load_env()
@@ -320,6 +432,17 @@ def cmd_auto(args):
         print("\n  Error: POLYMARKET_PRIVATE_KEY not set.")
         print("  Copy .env.example to .env and add your wallet private key.")
         print("  This is only needed for real trading.\n")
+        return
+
+    # Interactive mode when no market ID provided
+    if args.id is None:
+        _interactive_auto()
+        return
+
+    # Direct mode — --side is required
+    if args.side is None:
+        print("\n  Error: --side is required when passing a market ID directly.")
+        print("  Usage: python3 run.py auto <ID> --side yes\n")
         return
 
     from src.polymarket_client import PolymarketClient
@@ -395,7 +518,8 @@ def main():
             "  python3 run.py market <ID>           View market details\n"
             "  python3 run.py paper <ID>            Paper trade (simulated)\n"
             "  python3 run.py trade <ID>            Real trade (needs .env)\n"
-            "  python3 run.py auto <ID> --side yes  Auto-trade (continuous)\n"
+            "  python3 run.py auto                  Auto-trade (interactive)\n"
+            "  python3 run.py auto <ID> --side yes  Auto-trade (direct)\n"
             "  python3 run.py backtest              Run strategy backtest\n"
             "  python3 run.py collect               Collect data snapshot\n"
         ),
@@ -425,8 +549,8 @@ def main():
 
     # auto
     p_auto = sub.add_parser("auto", help="Auto-trade: place order, monitor, enforce stops")
-    p_auto.add_argument("id", help="Market ID")
-    p_auto.add_argument("--side", required=True, choices=["yes", "no"], help="Side to buy (yes or no)")
+    p_auto.add_argument("id", nargs="?", default=None, help="Market ID (omit for interactive mode)")
+    p_auto.add_argument("--side", choices=["yes", "no"], default=None, help="Side to buy (yes or no)")
     p_auto.add_argument("--amount", type=float, default=1.0, help="Amount in USDC (default: 1.0)")
     p_auto.add_argument("--interval", type=int, default=60, help="Monitor interval in seconds (default: 60)")
     p_auto.add_argument("--stop-loss", type=float, default=50.0, dest="stop_loss", help="Stop-loss %% (default: 50)")
