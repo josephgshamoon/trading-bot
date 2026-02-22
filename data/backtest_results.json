@@ -1,20 +1,45 @@
 {
-  "strategy": "Polymarket High-Volume Trend Following",
-  "config": {
-    "min_prob": 0.1,
-    "max_prob": 0.9,
-    "position_size": 1.0,
-    "min_volume": 50000,
-    "fee": 0.02,
-    "slippage": 0.01
-  },
-  "signals_found": 65,
-  "simulation_runs": 1000,
-  "metrics": {
-    "mean_pnl": -0.0541,
-    "win_rate": 25.5,
-    "avg_win": 2.0004,
-    "avg_loss": 0.7574
-  },
-  "timestamp": "2026-01-26T17:16:51.116486"
+  "total_trades": 2,
+  "winning_trades": 1,
+  "losing_trades": 1,
+  "win_rate": 50.0,
+  "total_profit": 4.6377,
+  "total_loss": 1.02,
+  "net_pnl": 3.6177,
+  "profit_factor": 4.55,
+  "sharpe_ratio": 7.18,
+  "max_drawdown": 102.0,
+  "average_trade": 1.8089,
+  "average_win": 4.6377,
+  "average_loss": -1.02,
+  "total_exposure": 2.0,
+  "fees_paid": 0.04,
+  "trades": [
+    {
+      "market_id": "1198423",
+      "market_question": "US strikes Iran by February 28, 2026?",
+      "entry_time": "2026-02-22T03:00:04.428374",
+      "entry_price": 0.175,
+      "position_size": 1.0,
+      "outcome": "YES",
+      "exit_time": null,
+      "exit_price": null,
+      "profit": 4.637708628005658,
+      "resolved": true,
+      "win": true
+    },
+    {
+      "market_id": "1310506",
+      "market_question": "UFC Fight Night: Sean Strickland vs. Anthony Hernandez (Middleweight, Main Card)",
+      "entry_time": "2026-02-22T03:00:04.428452",
+      "entry_price": 0.295,
+      "position_size": 1.0,
+      "outcome": "NO",
+      "exit_time": null,
+      "exit_price": null,
+      "profit": -1.02,
+      "resolved": true,
+      "win": false
+    }
+  ]
 }
